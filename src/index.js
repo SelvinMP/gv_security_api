@@ -10,6 +10,8 @@ const { connectDB } = require('./config/db');
 const authRoutes = require('./routes/authRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const reservationRoutes = require('./routes/reservationRoutes');
+const visitorRoutes = require('./routes/visitorRoutes');
+
 
 const app = express();
 
@@ -26,8 +28,10 @@ connectDB();
 console.log('Iniciando registro de rutas...');
 app.use('/api/auth', authRoutes);
 app.use('/api/reservas', reservationRoutes);
+app.use('/api/visitantes', visitorRoutes);
 app.use('/api', notificationRoutes);
-console.log('Rutas registradas exitosamente en /api/auth, /api/reservas y /api');
+console.log('Rutas registradas exitosamente en /api/auth, /api/reservas, /api/visitantes y /api');
+
 
 
 

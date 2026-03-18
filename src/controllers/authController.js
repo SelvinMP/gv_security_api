@@ -483,4 +483,315 @@ const set2FAStatus = async (req, res) => {
   }
 };
 
-module.exports = { register, login, verify2FA, verifyRegistration, savePersonalData, get2FAStatus, set2FAStatus, getNationalities, getContactTypes, getRelationships, getCondos };
+const getUserProfile = async (req, res) => {
+  const { usuarioId } = req.params;
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const query = `
+      SELECT 
+          u.NOMBRE_USUARIO,
+          u.EMAIL,
+          u.PRIMER_INGRESO,
+          CASE 
+              WHEN p.ID_NACIONALIDAD = 1 THEN p.DNI_PERSONA
+              WHEN p.ID_NACIONALIDAD = 2 THEN p.NUM_CARNET_EXTRANJERO
+          END AS DOCUMENTO,
+          d.DESCRIPCION AS CONDOMINIO,
+          c.DESCRIPCION AS CONTACTO,
+          p.ID_PADRE,
+          r.ROL AS ROL
+      FROM TBL_MS_USUARIO u
+      LEFT JOIN TBL_PERSONAS p 
+          ON u.ID_USUARIO = p.ID_USUARIO
+      LEFT JOIN TBL_CONDOMINIOS d 
+          ON p.ID_CONDOMINIO = d.ID_CONDOMINIO
+      LEFT JOIN TBL_CONTACTOS c 
+          ON p.ID_CONTACTO = c.ID_CONTACTO
+      LEFT JOIN TBL_MS_ROLES r 
+          ON u.ID_ROL = r.ID_ROL
+      WHERE u.ID_USUARIO = ?`;
+
+    const [results] = await connection.query(query, [usuarioId]);
+
+    if (results.length > 0) {
+      res.json(results[0]);
+    } else {
+      res.status(404).json({ message: "Perfil no encontrado" });
+    }
+  } catch (error) {
+    console.error("Error al obtener perfil:", error);
+    res.status(500).json({ message: "Error al obtener perfil" });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+const getFamilyMembers = async (req, res) => {
+  const { usuarioId } = req.params;
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const query = `
+      SELECT 
+          u.NOMBRE_USUARIO AS USUARIO_REGISTRADO,
+          d.DESCRIPCION AS NOMBRE_CONDOMINIO,
+          par.DESCRIPCION AS PARENTESCO,
+          COUNT(p.ID_PERSONA) OVER (PARTITION BY p.ID_CONDOMINIO) AS TOTAL_RESIDENTES
+      FROM TBL_MS_USUARIO u
+      INNER JOIN TBL_PERSONAS p 
+          ON u.ID_USUARIO = p.ID_USUARIO
+      INNER JOIN TBL_CONDOMINIOS d 
+          ON p.ID_CONDOMINIO = d.ID_CONDOMINIO
+      LEFT JOIN TBL_PARENTESCOS par
+          ON p.ID_PARENTESCO = par.ID_PARENTESCO
+      WHERE p.ID_CONDOMINIO = (
+          SELECT p2.ID_CONDOMINIO 
+          FROM TBL_PERSONAS p2 
+          WHERE p2.ID_USUARIO = ?
+      )`;
+
+    const [results] = await connection.query(query, [usuarioId]);
+    res.json(results);
+  } catch (error) {
+    console.error("Error al obtener miembros de la familia:", error);
+    res.status(500).json({ message: "Error al obtener miembros de la familia" });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+// Get detailed info about user's condominium
+const getCondominiumDetails = async (req, res) => {
+  const { usuarioId } = req.params;
+  try {
+    const connection = await mysqlPool.getConnection();
+    const query = `
+      SELECT 
+          c.DESCRIPCION AS NOMBRE_CONDOMINIO,
+          tc.DESCRIPCION AS TIPO_CONDOMINIO,
+          c.USUARIOS_POR_CASA
+      FROM TBL_PERSONAS p
+      INNER JOIN TBL_CONDOMINIOS c ON p.ID_CONDOMINIO = c.ID_CONDOMINIO
+      INNER JOIN TBL_TIPO_CONDOMINIO tc ON c.ID_TIPO_CONDOMINIO = tc.ID_TIPO_CONDOMINIO
+      WHERE p.ID_USUARIO = ?
+    `;
+    const [results] = await connection.query(query, [usuarioId]);
+    connection.release();
+    if (results.length > 0) {
+      res.json(results[0]);
+    } else {
+      res.status(404).json({ message: 'Condominio no encontrado' });
+    }
+  } catch (error) {
+    console.error('Error in getCondominiumDetails:', error);
+    res.status(500).json({ message: 'Error interno del servidor' });
+  }
+};
+
+// Get pending or new users in the same condominium
+const getPendingUsers = async (req, res) => {
+  const { usuarioId } = req.params;
+  try {
+    const connection = await mysqlPool.getConnection();
+    const query = `
+      SELECT 
+          u.ID_USUARIO,
+          u.NOMBRE_USUARIO,
+          u.EMAIL,
+          eu.DESCRIPCION AS ESTADO,
+          p.ID_PERSONA
+      FROM TBL_MS_USUARIO u
+      INNER JOIN TBL_PERSONAS p ON u.ID_USUARIO = p.ID_USUARIO
+      INNER JOIN TBL_ESTADO_USUARIO eu ON u.ID_ESTADO_USUARIO = eu.ID_ESTADO_USUARIO
+      WHERE p.ID_CONDOMINIO = (
+          SELECT p2.ID_CONDOMINIO FROM TBL_PERSONAS p2 WHERE p2.ID_USUARIO = ?
+      )
+      AND u.ID_ESTADO_USUARIO IN (4, 5)
+      AND u.ID_USUARIO <> ?
+    `;
+    const [results] = await connection.query(query, [usuarioId, usuarioId]);
+    connection.release();
+    res.json(results);
+  } catch (error) {
+    console.error('Error in getPendingUsers:', error);
+    res.status(500).json({ message: 'Error interno del servidor' });
+  }
+};
+
+// Approve user access
+const approveUser = async (req, res) => {
+  const { targetUsuarioId } = req.params;
+  try {
+    const connection = await mysqlPool.getConnection();
+    await connection.query(
+      'UPDATE TBL_MS_USUARIO SET ID_ESTADO_USUARIO = 1 WHERE ID_USUARIO = ?',
+      [targetUsuarioId]
+    );
+    connection.release();
+    res.json({ message: 'Usuario aprobado con éxito' });
+  } catch (error) {
+    console.error('Error in approveUser:', error);
+    res.status(500).json({ message: 'Error al aprobar usuario' });
+  }
+};
+
+// Reject and delete user request
+const rejectUser = async (req, res) => {
+  const { targetUsuarioId } = req.params;
+  try {
+    const connection = await mysqlPool.getConnection();
+    await connection.beginTransaction();
+
+    // Delete from TBL_PERSONAS first due to FK
+    await connection.query('DELETE FROM TBL_PERSONAS WHERE ID_USUARIO = ?', [targetUsuarioId]);
+    // Delete from TBL_MS_USUARIO
+    await connection.query('DELETE FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?', [targetUsuarioId]);
+
+    await connection.commit();
+    connection.release();
+    res.json({ message: 'Solicitud rechazada y eliminada' });
+  } catch (error) {
+    console.error('Error in rejectUser:', error);
+    res.status(500).json({ message: 'Error al rechazar solicitud' });
+  }
+};
+
+// Password Recovery Functions
+const enviarCodigoRecuperacion = async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ message: "El correo es requerido" });
+
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const [rows] = await connection.query("SELECT ID_USUARIO FROM TBL_MS_USUARIO WHERE EMAIL = ?", [email]);
+    if (rows.length === 0) return res.status(404).json({ message: "Usuario no encontrado" });
+
+    const verificationCode = crypto.randomBytes(3).toString("hex").toUpperCase();
+    const encryptedCode = encrypt(verificationCode);
+
+    await connection.query("UPDATE TBL_MS_USUARIO SET CODIGO_VERIFICACION = ? WHERE EMAIL = ?", [encryptedCode, email]);
+
+    const mailOptions = {
+      from: `"GV-Security Support" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject: "Recuperación de Contraseña",
+      html: `<div style="font-family: sans-serif; padding: 20px; border: 1px solid #ddd;">
+          <h2>Recuperación de Contraseña</h2>
+          <p>Has solicitado restablecer tu contraseña. Tu código de verificación es:</p>
+          <p style="font-size: 32px; font-weight: bold; color: #d4af37; letter-spacing: 5px;">${verificationCode}</p>
+          <p>Si no solicitaste este cambio, puedes ignorar este correo.</p>
+        </div>`
+    };
+
+    await transporter.sendMail(mailOptions);
+    res.json({ success: true, message: "Código enviado a su correo", id_usuario: rows[0].ID_USUARIO });
+  } catch (error) {
+    console.error("Error in enviarCodigoRecuperacion:", error);
+    res.status(500).json({ message: "Error al enviar el código" });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+const verificarCodigoRecuperacion = async (req, res) => {
+  const { id_usuario, codigo } = req.body;
+  if (!id_usuario || !codigo) return res.status(400).json({ message: "Datos incompletos" });
+
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const [rows] = await connection.query("SELECT CODIGO_VERIFICACION FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?", [id_usuario]);
+    if (rows.length === 0) return res.status(404).json({ message: "Usuario no encontrado" });
+
+    const encryptedInput = encrypt(codigo.toUpperCase());
+    if (rows[0].CODIGO_VERIFICACION !== encryptedInput) {
+      return res.status(401).json({ message: "Código incorrecto" });
+    }
+
+    res.json({ success: true, message: "Código verificado correctamente" });
+  } catch (error) {
+    console.error("Error in verificarCodigoRecuperacion:", error);
+    res.status(500).json({ message: "Error al verificar el código" });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+const actualizarContrasena = async (req, res) => {
+  const { id_usuario, nuevaContrasena } = req.body;
+  if (!id_usuario || !nuevaContrasena) return res.status(400).json({ message: "Datos incompletos" });
+
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const hashedPassword = await bcrypt.hash(nuevaContrasena, 8);
+    
+    await connection.query(
+      "UPDATE TBL_MS_USUARIO SET CONTRASEÑA = ?, CODIGO_VERIFICACION = NULL, INTENTOS_FALLIDOS = 0 WHERE ID_USUARIO = ?", 
+      [hashedPassword, id_usuario]
+    );
+
+    res.json({ success: true, message: "Contraseña actualizada exitosamente" });
+  } catch (error) {
+    console.error("Error in actualizarContrasena:", error);
+    res.status(500).json({ message: "Error al actualizar la contraseña" });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+const changePassword = async (req, res) => {
+  const { id_usuario, currentPassword, newPassword } = req.body;
+  if (!id_usuario || !currentPassword || !newPassword) {
+    return res.status(400).json({ message: "Todos los campos son requeridos" });
+  }
+
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const [rows] = await connection.query("SELECT CONTRASEÑA FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?", [id_usuario]);
+    if (rows.length === 0) return res.status(404).json({ message: "Usuario no encontrado" });
+
+    const user = rows[0];
+    const passwordIsValid = await bcrypt.compare(currentPassword, user.CONTRASEÑA);
+    if (!passwordIsValid) {
+      return res.status(401).json({ message: "La contraseña actual es incorrecta" });
+    }
+
+    const hashedNewPassword = await bcrypt.hash(newPassword, 8);
+    await connection.query("UPDATE TBL_MS_USUARIO SET CONTRASEÑA = ? WHERE ID_USUARIO = ?", [hashedNewPassword, id_usuario]);
+
+    res.json({ success: true, message: "Contraseña cambiada correctamente" });
+  } catch (error) {
+    console.error("Error in changePassword:", error);
+    res.status(500).json({ message: "Error interno del servidor" });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+module.exports = {
+  register, 
+  login,
+  verify2FA,
+  verifyRegistration,
+  enviarCodigoRecuperacion,
+  verificarCodigoRecuperacion,
+  actualizarContrasena,
+  getNationalities,
+  getContactTypes,
+  getRelationships, // Assuming getParentesco is getRelationships
+  getCondos, // Assuming getCondominios is getCondos
+  savePersonalData,
+  get2FAStatus,
+  set2FAStatus,
+  getUserProfile,
+  getFamilyMembers,
+  getCondominiumDetails,
+  getPendingUsers,
+  approveUser,
+  rejectUser,
+  changePassword
+};
