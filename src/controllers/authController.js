@@ -157,6 +157,7 @@ const login = async (req, res) => {
       return res.status(200).json({ token, id_usuario: user.ID_USUARIO, require2FA: false, message: "Login exitoso" });
     }
   } catch (err) {
+    console.error("Error en login:", err);
     res.status(500).json({ message: "Error interno del servidor" });
   } finally {
     if (connection) connection.release();
@@ -255,6 +256,7 @@ const getNationalities = async (req, res) => {
     const [results] = await connection.query("SELECT ID_NACIONALIDAD, NOMBRE_NACIONALIDAD FROM TBL_NACIONALIDADES");
     res.json(results);
   } catch (err) {
+    console.error("Error en getNationalities:", err);
     res.status(500).json({ error: "Error al obtener nacionalidades" });
   } finally {
     if (connection) connection.release();
