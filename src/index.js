@@ -12,18 +12,16 @@ const notificationRoutes = require('./routes/notificationRoutes');
 const reservationRoutes = require('./routes/reservationRoutes');
 const visitorRoutes = require('./routes/visitorRoutes');
 
-
 const app = express();
 
 // 1. Middlewares de Seguridad y Control
-app.use(helmet()); // Protege de ataques web comunes
-//app.use(cors());   // Permite que tu App de React se conecte sin bloqueos
-app.use(morgan('dev')); // Muestra en consola qué rutas se están visitando
-app.use(express.json()); // Permite recibir datos en formato JSON (como el Login)
-const cors = require('cors');
+app.use(helmet()); 
+app.use(morgan('dev')); 
+app.use(express.json()); 
 
+// CONFIGURACIÓN DE CORS (Solo una vez y con tu URL)
 app.use(cors({
-  origin: 'https://gv-security.web.app', // Tu URL de Firebase
+  origin: 'https://gv-security.web.app', 
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   credentials: true
 }));
@@ -37,11 +35,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/reservas', reservationRoutes);
 app.use('/api/visitantes', visitorRoutes);
 app.use('/api', notificationRoutes);
-console.log('Rutas registradas exitosamente en /api/auth, /api/reservas, /api/visitantes y /api');
-
-
-
-
+console.log('Rutas registradas exitosamente');
 
 app.get('/', (req, res) => {
     res.json({
@@ -51,16 +45,15 @@ app.get('/', (req, res) => {
     });
 });
 
-// Ruta para verificar que la comunicación con React funciona
 app.post('/api/check-connection', (req, res) => {
     console.log('Datos recibidos de React:', req.body);
     res.json({ success: true, message: "Conexión exitosa con el Backend" });
 });
 
-// 4. Configuración del Puerto
+// 4. Configuración del Puerto (Optimizado para Render)
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, () => {
     console.log('==============================================');
-    console.log(`🚀 Servidor corriendo en puerto: ${PORT} (Accesible en la red Wi-Fi)`);
+    console.log(`🚀 Servidor corriendo en puerto: ${PORT}`);
     console.log('==============================================');
 });
