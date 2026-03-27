@@ -12,6 +12,13 @@ const db = new Sequelize(
     dialect: 'mysql',
     port: process.env.DB_PORT,
     logging: false,
+    // --- ESTO SOLUCIONA EL ERROR EN SEQUELIZE ---
+    dialectOptions: {
+      authPlugins: {
+        mysql_native_password: 'mysql_native_password'
+      },
+      connectTimeout: 60000 // Aumentamos el tiempo de espera por si Render tarda
+    }
   }
 );
 
@@ -24,7 +31,10 @@ const mysqlPool = mysql.createPool({
   port: process.env.DB_PORT,
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0
+  queueLimit: 0,
+  // --- ESTO SOLUCIONA EL ERROR EN EL POOL ---
+  allowPublicKeyRetrieval: true,
+  ssl: false 
 });
 
 // Función para probar la conexión
@@ -39,6 +49,10 @@ const connectDB = async () => {
     connection.release();
   } catch (error) {
     console.error('❌ No se pudo conectar a la base de datos:', error);
+    // Imprimimos más detalles para saber exactamente qué falló
+    if (error.original) {
+        console.error('Detalle técnico:', error.original.message);
+    }
   }
 };
 
