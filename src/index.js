@@ -15,6 +15,9 @@ const visitorRoutes = require('./routes/visitorRoutes');
 const app = express();
 
 // 1. Middlewares de Seguridad y Control
+app.use(morgan('dev')); 
+app.use(express.json()); 
+
 // CONFIGURACIÓN DE CORS (Permitir todo en desarrollo para que funcione desde el celular)
 app.use(cors({
   origin: '*', 
@@ -27,6 +30,7 @@ app.use(cors({
 app.use(helmet({
   contentSecurityPolicy: false,
 }));
+
 
 
 // 2. Conexión a la Base de Datos (GV-Security)
