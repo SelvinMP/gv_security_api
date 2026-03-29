@@ -15,16 +15,19 @@ const visitorRoutes = require('./routes/visitorRoutes');
 const app = express();
 
 // 1. Middlewares de Seguridad y Control
-app.use(helmet()); 
-app.use(morgan('dev')); 
-app.use(express.json()); 
-
-// CONFIGURACIÓN DE CORS (Solo una vez y con tu URL)
+// CONFIGURACIÓN DE CORS (Permitir todo en desarrollo para que funcione desde el celular)
 app.use(cors({
-  origin: 'https://gv-security.web.app', 
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  origin: '*', 
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
   credentials: true
 }));
+
+// Ajuste opcional para Helmet en desarrollo (evita bloqueos de recursos)
+app.use(helmet({
+  contentSecurityPolicy: false,
+}));
+
 
 // 2. Conexión a la Base de Datos (GV-Security)
 connectDB();
