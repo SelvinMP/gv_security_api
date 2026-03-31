@@ -254,7 +254,7 @@ const getVisitorHistory = async (req, res) => {
 
 const regenerateVisit = async (req, res) => {
   const { id, type } = req.params;
-  const { newExpiry } = req.body;
+  const { newExpiry, numPersonas, numPlaca } = req.body;
   let connection;
 
   try {
@@ -263,8 +263,8 @@ const regenerateVisit = async (req, res) => {
     if (type === 'recurrent') {
       const formattedExpiry = moment(newExpiry).format("YYYY-MM-DD HH:mm:ss");
       await connection.query(
-        "UPDATE TBL_VISITANTES_RECURRENTES SET FECHA_VENCIMIENTO = ?, ESTADO_QR = 0 WHERE ID_VISITANTES_RECURRENTES = ?",
-        [formattedExpiry, id]
+        "UPDATE TBL_VISITANTES_RECURRENTES SET FECHA_VENCIMIENTO = ?, NUM_PERSONAS = ?, NUM_PLACA = ?, ESTADO_QR = 0 WHERE ID_VISITANTES_RECURRENTES = ?",
+        [formattedExpiry, numPersonas, numPlaca, id]
       );
       
       const [visitor] = await connection.query("SELECT * FROM TBL_VISITANTES_RECURRENTES WHERE ID_VISITANTES_RECURRENTES = ?", [id]);
@@ -285,8 +285,8 @@ const regenerateVisit = async (req, res) => {
         Condominio: resInfo.ID_CONDOMINIO,
         NOMBRE_VISITANTE: v.NOMBRE_VISITANTE,
         DNI_VISITANTE: v.DNI_VISITANTE || v.NUM_CARNET_EXTRANJERO,
-        NUM_PERSONAS: v.NUM_PERSONAS,
-        NUM_PLACA: v.NUM_PLACA,
+        NUM_PERSONAS: numPersonas || v.NUM_PERSONAS,
+        NUM_PLACA: numPlaca || (v.NUM_PLACA || ''),
         FECHA_VENCIMIENTO: formattedExpiry,
         isRecurrent: true
       };
@@ -303,7 +303,7 @@ const regenerateVisit = async (req, res) => {
       
       const [result] = await connection.query(
         "INSERT INTO TBL_REGVISITAS (ID_USUARIO, NOMBRE_VISITANTE, ID_NACIONALIDAD, DNI_VISITANTE, NUM_CARNET_EXTRANJERO, NUM_PERSONAS, NUM_PLACA, FECHA_HORA, ESTADO_QR) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
-        [v.ID_USUARIO, v.NOMBRE_VISITANTE, v.ID_NACIONALIDAD, v.DNI_VISITANTE, v.NUM_CARNET_EXTRANJERO, v.NUM_PERSONAS, v.NUM_PLACA, now]
+        [v.ID_USUARIO, v.NOMBRE_VISITANTE, v.ID_NACIONALIDAD, v.DNI_VISITANTE, v.NUM_CARNET_EXTRANJERO, numPersonas || v.NUM_PERSONAS, numPlaca || (v.NUM_PLACA || ''), now]
       );
       
       // Get Resident Info for QR
@@ -321,8 +321,8 @@ const regenerateVisit = async (req, res) => {
         Condominio: resInfo.ID_CONDOMINIO,
         NOMBRE_VISITANTE: v.NOMBRE_VISITANTE,
         DNI_VISITANTE: v.DNI_VISITANTE || v.NUM_CARNET_EXTRANJERO,
-        NUM_PERSONAS: v.NUM_PERSONAS,
-        NUM_PLACA: v.NUM_PLACA,
+        NUM_PERSONAS: numPersonas || v.NUM_PERSONAS,
+        NUM_PLACA: numPlaca || (v.NUM_PLACA || ''),
         FECHA_VENCIMIENTO: null,
         isRecurrent: false
       };
