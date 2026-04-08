@@ -6,60 +6,16 @@ const registerVisit = async (req, res) => {
   const {
     usuarioId,
     NOMBRE_VISITANTE,
-    NACIONALIDAD,
-    DNI_VISITANTE,
-    CARNET_EXTRANJERO,
     NUM_PERSONAS,
-    NUM_PLACA,
+    NOTA,
     isRecurrentVisitor,
     FECHA_VENCIMIENTO,
   } = req.body;
   
   let connection;
 
-  const esHondurena = NACIONALIDAD && NACIONALIDAD.toLowerCase().includes("hondureña");
-
-  if (esHondurena && !DNI_VISITANTE) {
-    return res.status(400).json({ error: "El DNI es requerido para nacionalidad hondureña" });
-  }
-
-  if (!esHondurena && !CARNET_EXTRANJERO) {
-    return res.status(400).json({ error: "El Carnet de Extranjero es requerido para nacionalidad extranjera" });
-  }
-
   try {
     connection = await mysqlPool.getConnection();
-
-    // Validar DNI únicamente si es nacionalidad hondureña
-    if (esHondurena) {
-      if (!DNI_VISITANTE) {
-        return res.status(400).json({ error: "El DNI es requerido para nacionalidad hondureña" });
-      }
-      if (DNI_VISITANTE.length < 4) {
-        return res.status(400).json({ error: "El número de identidad debe tener al menos 4 dígitos" });
-      }
-      const codigoDNI = DNI_VISITANTE.substring(0, 4);
-      const [codigoResults] = await connection.query("SELECT COUNT(*) as count FROM TBL_CODIGO_DNI WHERE CODIGO = ?", [codigoDNI]);
-      if (codigoResults[0].count === 0) {
-        return res.status(400).json({ error: "El código de área del DNI no es válido." });
-      }
-    }
-
-    // Obtener ID_NACIONALIDAD
-    let ID_NACIONALIDAD = null;
-    if (NACIONALIDAD) {
-      // Intentamos búsqueda exacta o variaciones de 'Extranjero'
-      const [nacionalidadResults] = await connection.query(
-        "SELECT ID_NACIONALIDAD FROM TBL_NACIONALIDADES WHERE NOMBRE_NACIONALIDAD = ? OR NOMBRE_NACIONALIDAD = 'EXTRANJERA' OR NOMBRE_NACIONALIDAD = 'EXTRANJERO' OR NOMBRE_NACIONALIDAD LIKE 'EXTRANJER%'", 
-        [NACIONALIDAD]
-      );
-      
-      if (nacionalidadResults.length > 0) {
-        ID_NACIONALIDAD = nacionalidadResults[0].ID_NACIONALIDAD;
-      } else if (NACIONALIDAD.toLowerCase() !== 'extranjero') {
-        return res.status(400).json({ error: "Nacionalidad no encontrada" });
-      }
-    }
 
     // Obtener info del residente/usuario
     const [personaResults] = await connection.query(
@@ -91,13 +47,13 @@ const registerVisit = async (req, res) => {
        FECHA_VENCIMIENTO_FINAL = moment(FECHA_VENCIMIENTO).format("YYYY-MM-DD HH:mm:ss");
        
        insertQuery = `INSERT INTO TBL_VISITANTES_RECURRENTES 
-         (ID_USUARIO, NOMBRE_VISITANTE, ID_NACIONALIDAD, DNI_VISITANTE, NUM_CARNET_EXTRANJERO, NUM_PERSONAS, NUM_PLACA, FECHA_HORA, FECHA_VENCIMIENTO) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-       insertParams = [usuarioId, NOMBRE_VISITANTE, ID_NACIONALIDAD, DNI_VISITANTE, CARNET_EXTRANJERO, NUM_PERSONAS, NUM_PLACA, fechaHoraStr, FECHA_VENCIMIENTO_FINAL];
+         (ID_USUARIO, NOMBRE_VISITANTE, ID_NACIONALIDAD, DNI_VISITANTE, NUM_CARNET_EXTRANJERO, NUM_PERSONAS, NUM_PLACA, NOTA, FECHA_HORA, FECHA_VENCIMIENTO) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+       insertParams = [usuarioId, NOMBRE_VISITANTE, null, null, null, NUM_PERSONAS, null, NOTA, fechaHoraStr, FECHA_VENCIMIENTO_FINAL];
     } else {
-       insertQuery = `INSERT INTO TBL_REGVISITAS (ID_USUARIO, NOMBRE_VISITANTE, ID_NACIONALIDAD, DNI_VISITANTE, NUM_CARNET_EXTRANJERO, NUM_PERSONAS, NUM_PLACA, FECHA_HORA) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
-       insertParams = [usuarioId, NOMBRE_VISITANTE, ID_NACIONALIDAD, DNI_VISITANTE, CARNET_EXTRANJERO, NUM_PERSONAS, NUM_PLACA, fechaHoraStr];
+       insertQuery = `INSERT INTO TBL_REGVISITAS (ID_USUARIO, NOMBRE_VISITANTE, ID_NACIONALIDAD, DNI_VISITANTE, NUM_CARNET_EXTRANJERO, NUM_PERSONAS, NUM_PLACA, NOTA, FECHA_HORA) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+       insertParams = [usuarioId, NOMBRE_VISITANTE, null, null, null, NUM_PERSONAS, null, NOTA, fechaHoraStr];
     }
 
     const [result] = await connection.query(insertQuery, insertParams);
@@ -106,15 +62,14 @@ const registerVisit = async (req, res) => {
     // Bitácora
     let insertBitacoraQuery, insertBitacoraParams;
     if (isRecurrentVisitor) {
-      insertBitacoraQuery = "INSERT INTO TBL_BITACORA_VISITA (ID_PERSONA, ID_VISITANTES_RECURRENTES, NUM_PERSONA, NUM_PLACA, FECHA_HORA, FECHA_VENCIMIENTO) VALUES (?, ?, ?, ?, ?, ?)";
-      insertBitacoraParams = [ID_PERSONA, ID_VISITANTE, NUM_PERSONAS, NUM_PLACA, fechaHoraStr, FECHA_VENCIMIENTO_FINAL];
+      insertBitacoraQuery = "INSERT INTO TBL_BITACORA_VISITA (ID_PERSONA, ID_VISITANTES_RECURRENTES, NUM_PERSONA, NUM_PLACA, NOTA, FECHA_HORA, FECHA_VENCIMIENTO) VALUES (?, ?, ?, ?, ?, ?, ?)";
+      insertBitacoraParams = [ID_PERSONA, ID_VISITANTE, NUM_PERSONAS, null, NOTA, fechaHoraStr, FECHA_VENCIMIENTO_FINAL];
     } else {
-      insertBitacoraQuery = "INSERT INTO TBL_BITACORA_VISITA (ID_PERSONA, ID_VISITANTE, NUM_PERSONA, NUM_PLACA, FECHA_HORA) VALUES (?, ?, ?, ?, ?)";
-      insertBitacoraParams = [ID_PERSONA, ID_VISITANTE, NUM_PERSONAS, NUM_PLACA, fechaHoraStr];
+      insertBitacoraQuery = "INSERT INTO TBL_BITACORA_VISITA (ID_PERSONA, ID_VISITANTE, NUM_PERSONA, NUM_PLACA, NOTA, FECHA_HORA) VALUES (?, ?, ?, ?, ?, ?)";
+      insertBitacoraParams = [ID_PERSONA, ID_VISITANTE, NUM_PERSONAS, null, NOTA, fechaHoraStr];
     }
     await connection.query(insertBitacoraQuery, insertBitacoraParams);
 
-    // QR Data matching the Card UI
     const qrData = {
       Residente: personaInfo.NOMBRE_PERSONA,
       DNI_Residente: personaInfo.DNI_PERSONA || personaInfo.NUM_CARNET_EXTRANJERO,
@@ -122,10 +77,10 @@ const registerVisit = async (req, res) => {
       ID_VISITANTE,
       Condominio: personaInfo.ID_CONDOMINIO,
       NOMBRE_VISITANTE,
-      NACIONALIDAD,
-      DNI_VISITANTE: DNI_VISITANTE || CARNET_EXTRANJERO,
+      NACIONALIDAD: 'N/A', // Omitido
+      DNI_VISITANTE: null,
       NUM_PERSONAS,
-      NUM_PLACA,
+      NUM_PLACA: null,
       FECHA_VENCIMIENTO: isRecurrentVisitor ? FECHA_VENCIMIENTO_FINAL : null,
       isRecurrent: isRecurrentVisitor
     };
@@ -302,8 +257,8 @@ const regenerateVisit = async (req, res) => {
       const now = moment().tz("America/Tegucigalpa").format("YYYY-MM-DD HH:mm:ss");
       
       const [result] = await connection.query(
-        "INSERT INTO TBL_REGVISITAS (ID_USUARIO, NOMBRE_VISITANTE, ID_NACIONALIDAD, DNI_VISITANTE, NUM_CARNET_EXTRANJERO, NUM_PERSONAS, NUM_PLACA, FECHA_HORA, ESTADO_QR) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
-        [v.ID_USUARIO, v.NOMBRE_VISITANTE, v.ID_NACIONALIDAD, v.DNI_VISITANTE, v.NUM_CARNET_EXTRANJERO, numPersonas || v.NUM_PERSONAS, numPlaca || (v.NUM_PLACA || ''), now]
+        "INSERT INTO TBL_REGVISITAS (ID_USUARIO, NOMBRE_VISITANTE, ID_NACIONALIDAD, DNI_VISITANTE, NUM_CARNET_EXTRANJERO, NUM_PERSONAS, NUM_PLACA, NOTA, FECHA_HORA, ESTADO_QR) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+        [v.ID_USUARIO, v.NOMBRE_VISITANTE, v.ID_NACIONALIDAD, v.DNI_VISITANTE, v.NUM_CARNET_EXTRANJERO, numPersonas || v.NUM_PERSONAS, numPlaca || (v.NUM_PLACA || ''), v.NOTA, now]
       );
       
       // Get Resident Info for QR
@@ -356,12 +311,12 @@ const convertToRecurrent = async (req, res) => {
 
     // Insert into TBL_VISITANTES_RECURRENTES
     const insertQuery = `INSERT INTO TBL_VISITANTES_RECURRENTES 
-      (ID_USUARIO, NOMBRE_VISITANTE, ID_NACIONALIDAD, DNI_VISITANTE, NUM_CARNET_EXTRANJERO, NUM_PERSONAS, NUM_PLACA, FECHA_HORA, FECHA_VENCIMIENTO) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+      (ID_USUARIO, NOMBRE_VISITANTE, ID_NACIONALIDAD, DNI_VISITANTE, NUM_CARNET_EXTRANJERO, NUM_PERSONAS, NUM_PLACA, NOTA, FECHA_HORA, FECHA_VENCIMIENTO) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
     
     const [result] = await connection.query(insertQuery, [
       v.ID_USUARIO, v.NOMBRE_VISITANTE, v.ID_NACIONALIDAD, v.DNI_VISITANTE, 
-      v.NUM_CARNET_EXTRANJERO, v.NUM_PERSONAS, v.NUM_PLACA, fechaHoraStr, formattedExpiry
+      v.NUM_CARNET_EXTRANJERO, v.NUM_PERSONAS, v.NUM_PLACA, v.NOTA, fechaHoraStr, formattedExpiry
     ]);
 
     const newRecurrentId = result.insertId;
