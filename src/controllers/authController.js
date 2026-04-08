@@ -3,7 +3,19 @@ const transporter = require('../config/transporter');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
+const admin = require('firebase-admin');
 
+try {
+  if (!admin.apps.length) {
+    const serviceAccount = require('../config/firebaseServiceAccountKey.json');
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+    console.log("🔥 Firebase Admin inicializado correctamente");
+  }
+} catch (error) {
+  console.warn("⚠️ Firebase Admin NO inicializado. Faltan credenciales (src/config/firebaseServiceAccountKey.json).");
+}
 const SECRET_KEY = process.env.SECRET_KEY || 'your_secret_key';
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || '00'.repeat(32);
 
@@ -414,20 +426,53 @@ const notifyAdmins = async (nombre, contacto, condo, isNewAdmin, condoId, esHond
 
     // 2. Notificar a Admins de la misma vivienda
     const [condoAdmins] = await mysqlPool.query(
-      `SELECT u.EMAIL FROM TBL_MS_USUARIO u 
+      `SELECT u.ID_USUARIO, u.EMAIL, u.FCM_TOKEN FROM TBL_MS_USUARIO u 
        JOIN TBL_PERSONAS p ON u.ID_USUARIO = p.ID_USUARIO 
        WHERE p.ID_CONDOMINIO = ? AND p.ID_PADRE = 1`, [condoId]
     );
 
     if (condoAdmins.length > 0) {
+      // 2.a Notificación por Correo
       const destinatarios = condoAdmins.map(c => c.EMAIL);
       const docInfo = esHondurena ? `<p>DNI: ${dni}</p>` : `<p>Carnet: ${carnet}</p>`;
+      const asunt = "Nuevo integrante registrado en su vivienda";
+      const menj = `Hola, un nuevo integrante se ha registrado en su vivienda: ${condo}. Nombre: ${nombre}, Contacto: ${contacto}`;
+      
       await transporter.sendMail({
         from: `"GV-Security" <${process.env.EMAIL_USER}>`,
         to: destinatarios,
-        subject: "Nuevo integrante registrado en su vivienda",
-        html: `<p>Hola, un nuevo integrante se ha registrado en su vivienda: <strong>${condo}</strong>.</p><p>Nombre: ${nombre}</p>${docInfo}<p>Contacto: ${contacto}</p>`
+        subject: asunt,
+        html: `<p>${menj}</p>${docInfo}`
       });
+
+      // 2.b Guardar en Base de Datos e Intentar Notification Push (Firebase)
+      const TokensFCM = [];
+      for (const destinatario of condoAdmins) {
+        // Insertar registro para que se vea dentro de la App ("Alertas")
+        await mysqlPool.query(
+          "INSERT INTO TBL_NOTIFICACIONES_APP (ID_USUARIO, TITULO, MENSAJE, FECHA_HORA, LEIDA) VALUES (?, ?, ?, NOW(), 0)",
+          [destinatario.ID_USUARIO, asunt, menj]
+        );
+
+        // Agrupar los tokens para mandar Push Multi-Cast (celulares)
+        if (destinatario.FCM_TOKEN) {
+          TokensFCM.push(destinatario.FCM_TOKEN);
+        }
+      }
+
+      // 2.c Enviar Push vía Firebase Cloud Messaging
+      if (TokensFCM.length > 0 && admin.apps.length > 0) {
+        const message = {
+          notification: {
+            title: asunt,
+            body: menj,
+          },
+          tokens: TokensFCM // Arreglo de tokens celulares validos
+        };
+        admin.messaging().sendEachForMulticast(message)
+          .then((response) => console.log(response.successCount + ' mensajes FCM enviados correctamente.'))
+          .catch((error) => console.error('Error enviando push FCM:', error));
+      }
     }
   } catch (err) {
     console.error("Error enviando notificaciones:", err);
