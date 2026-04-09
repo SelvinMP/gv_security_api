@@ -3,6 +3,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const moment = require('moment-timezone');
 const admin = require('firebase-admin');
+const transporter = require('../config/transporter');
 
 const SECRET_KEY = process.env.SECRET_KEY || 'your_secret_key';
 
@@ -67,9 +68,12 @@ const getVisitDetails = async (req, res) => {
           v.FECHA_VENCIMIENTO,
           v.ESTADO_QR,
           v.ID_USUARIO,
-          u.NOMBRE_USUARIO as RESIDENTE
+          u.NOMBRE_USUARIO as RESIDENTE,
+          c.DESCRIPCION as CASA_DESTINO
         FROM TBL_VISITANTES_RECURRENTES v
         JOIN TBL_MS_USUARIO u ON v.ID_USUARIO = u.ID_USUARIO
+        LEFT JOIN TBL_PERSONAS p ON p.ID_USUARIO = v.ID_USUARIO
+        LEFT JOIN TBL_CONDOMINIOS c ON c.ID_CONDOMINIO = p.ID_CONDOMINIO
         WHERE v.ID_VISITANTES_RECURRENTES = ?
       `, [id]);
 
@@ -91,9 +95,12 @@ const getVisitDetails = async (req, res) => {
           v.FECHA_HORA,
           v.ESTADO_QR,
           v.ID_USUARIO,
-          u.NOMBRE_USUARIO as RESIDENTE
+          u.NOMBRE_USUARIO as RESIDENTE,
+          c.DESCRIPCION as CASA_DESTINO
         FROM TBL_REGVISITAS v
         JOIN TBL_MS_USUARIO u ON v.ID_USUARIO = u.ID_USUARIO
+        LEFT JOIN TBL_PERSONAS p ON p.ID_USUARIO = v.ID_USUARIO
+        LEFT JOIN TBL_CONDOMINIOS c ON c.ID_CONDOMINIO = p.ID_CONDOMINIO
         WHERE v.ID_VISITANTE = ?
       `, [id]);
 
@@ -110,6 +117,20 @@ const getVisitDetails = async (req, res) => {
   }
 };
 
+const getMotivos = async (req, res) => {
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const [rows] = await connection.query("SELECT ID_MOTIVO, MOTIVO FROM TBL_MOTIVOS");
+    res.json(rows);
+  } catch (err) {
+    console.error("Error getMotivos:", err);
+    res.status(500).json({ message: "Error al obtener motivos" });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
 const confirmEntry = async (req, res) => {
   const { 
     id, 
@@ -117,7 +138,8 @@ const confirmEntry = async (req, res) => {
     numPersonas, 
     numPlaca, 
     nacionalidadId, 
-    documento 
+    documento,
+    motivoId
   } = req.body;
 
   let connection;
@@ -191,12 +213,25 @@ const confirmEntry = async (req, res) => {
 
     await connection.commit();
 
+    // Fetch Motivo Text if provided
+    let motivoTexto = null;
+    if (motivoId) {
+      const [motivoRows] = await connection.query("SELECT MOTIVO FROM TBL_MOTIVOS WHERE ID_MOTIVO = ?", [motivoId]);
+      if (motivoRows.length > 0) {
+        motivoTexto = motivoRows[0].MOTIVO;
+      }
+    }
+
     // Notify Resident
     try {
       const [userRows] = await connection.query("SELECT EMAIL, FCM_TOKEN FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?", [userId]);
       if (userRows.length > 0) {
         const title = "Su visita ha ingresado";
-        const bodyMsg = `${visitorData.NOMBRE_VISITANTE} ha registrado su ingreso (${numPersonas} persona/s).`;
+        let bodyMsg = `${visitorData.NOMBRE_VISITANTE} ha registrado su ingreso (${numPersonas} persona/s).`;
+        
+        if (motivoTexto) {
+          bodyMsg += ` Observación de Guardia: ${motivoTexto}`;
+        }
         
         // Save to TBL_NOTIFICACIONES_APP
         await connection.query(
@@ -216,6 +251,23 @@ const confirmEntry = async (req, res) => {
             .then(() => console.log('FCM Guardia a Residente enviado'))
             .catch((err) => console.log('Error FCM Guardia:', err));
         }
+
+        // Send Email if there is a behavior motive
+        if (motivoTexto && userRows[0].EMAIL) {
+          const mailOptions = {
+            from: `"GV-Security Guardia" <${process.env.EMAIL_USER}>`,
+            to: userRows[0].EMAIL,
+            subject: `Observación de Comportamiento: ${visitorData.NOMBRE_VISITANTE}`,
+            html: `<div style="font-family: sans-serif; border: 1px solid #ddd; padding: 20px;">
+                <h2 style="color: #0E2041;">Alerta de Guardia de Seguridad</h2>
+                <p>Estimado Residente,</p>
+                <p>El guardia de seguridad ha reportado la siguiente observación durante el ingreso de su visitante (<b>${visitorData.NOMBRE_VISITANTE}</b>):</p>
+                <p style="font-size: 18px; font-weight: bold; color: #d93025; background: #fce8e6; padding: 10px; border-radius: 5px;">${motivoTexto}</p>
+                <p>Por favor tome sus precauciones. Si necesita más información consulte con seguridad al llamar a caseta.</p>
+              </div>`
+          };
+          transporter.sendMail(mailOptions).catch(err => console.log('Error enviando correo de motivo:', err));
+        }
       }
     } catch (notifErr) {
       console.error("Error al notificar al residente:", notifErr);
@@ -234,5 +286,6 @@ const confirmEntry = async (req, res) => {
 module.exports = {
   loginGuardia,
   getVisitDetails,
+  getMotivos,
   confirmEntry
 };
