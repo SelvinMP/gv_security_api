@@ -190,7 +190,7 @@ const confirmEntry = async (req, res) => {
       await connection.query(`
         INSERT INTO TBL_BITACORA_VISITA (ID_PERSONA, ID_VISITANTES_RECURRENTES, NUM_PERSONA, NUM_PLACA, NOTA, FECHA_HORA, FECHA_ACCESO, FECHA_VENCIMIENTO)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `, [idPersona, id, numPersonas, numPlaca, "Ingreso registrado por guardia", visitorData.FECHA_HORA, now, visitorData.FECHA_VENCIMIENTO]);
+      `, [idPersona, id, numPersonas, numPlaca, visitorData.NOTA || null, visitorData.FECHA_HORA, now, visitorData.FECHA_VENCIMIENTO]);
 
     } else {
       const [visitorRes] = await connection.query("SELECT * FROM TBL_REGVISITAS WHERE ID_VISITANTE = ?", [id]);
