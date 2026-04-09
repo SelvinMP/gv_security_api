@@ -67,6 +67,7 @@ const getVisitDetails = async (req, res) => {
           v.FECHA_HORA,
           v.FECHA_VENCIMIENTO,
           v.ESTADO_QR,
+          v.NOTA,
           v.ID_USUARIO,
           u.NOMBRE_USUARIO as RESIDENTE,
           c.DESCRIPCION as CASA_DESTINO
@@ -77,10 +78,10 @@ const getVisitDetails = async (req, res) => {
         WHERE v.ID_VISITANTES_RECURRENTES = ?
       `, [id]);
 
-      if (rows.length === 0) return res.status(404).json({ message: "Visita no encontrada" });
+      if (rows.length === 0) return res.status(404).json({ message: "No se encontró información para este código QR." });
       
       const vencimiento = moment(rows[0].FECHA_VENCIMIENTO);
-      if (moment().isAfter(vencimiento)) return res.status(400).json({ message: "Código QR vencido" });
+      if (moment().isAfter(vencimiento)) return res.status(400).json({ message: "La fecha de validez de este código QR de visita recurrente ya venció o caducó." });
       
       return res.status(200).json({ data: rows[0], isRecurrent: true });
     } else {
@@ -94,6 +95,7 @@ const getVisitDetails = async (req, res) => {
           v.NUM_PLACA,
           v.FECHA_HORA,
           v.ESTADO_QR,
+          v.NOTA,
           v.ID_USUARIO,
           u.NOMBRE_USUARIO as RESIDENTE,
           c.DESCRIPCION as CASA_DESTINO
@@ -104,8 +106,8 @@ const getVisitDetails = async (req, res) => {
         WHERE v.ID_VISITANTE = ?
       `, [id]);
 
-      if (rows.length === 0) return res.status(404).json({ message: "Visita no encontrada" });
-      if (rows[0].ESTADO_QR === 1) return res.status(400).json({ message: "Código QR ya utilizado" });
+      if (rows.length === 0) return res.status(404).json({ message: "No se encontró información para este código QR." });
+      if (rows[0].ESTADO_QR === 1) return res.status(400).json({ message: "Este código QR de ingreso único ya fue utilizado o escaneado anteriormente." });
       
       return res.status(200).json({ data: rows[0], isRecurrent: false });
     }
