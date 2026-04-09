@@ -180,7 +180,7 @@ const confirmEntry = async (req, res) => {
       // Update TBL_VISITANTES_RECURRENTES
       await connection.query(`
         UPDATE TBL_VISITANTES_RECURRENTES 
-        SET FECHA_ACCESO = ?, NUM_PERSONAS = ?, NUM_PLACA = ?, ID_NACIONALIDAD = ?, DNI_VISITANTE = ?, NUM_CARNET_EXTRANJERO = ?, CANTIDAD_ESCANEANA = CANTIDAD_ESCANEANA + 1
+        SET FECHA_ACCESO = ?, NUM_PERSONAS = ?, NUM_PLACA = ?, ID_NACIONALIDAD = ?, DNI_VISITANTE = ?, NUM_CARNET_EXTRANJERO = ?, CANTIDAD_ESCANEANA = CANTIDAD_ESCANEANA + 1, ESTADO_QR = 1
         WHERE ID_VISITANTES_RECURRENTES = ?
       `, [now, numPersonas, numPlaca, nacionalidadId, dni, carnet, id]);
 
