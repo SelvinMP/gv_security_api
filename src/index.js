@@ -11,6 +11,7 @@ const authRoutes = require('./routes/authRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const reservationRoutes = require('./routes/reservationRoutes');
 const visitorRoutes = require('./routes/visitorRoutes');
+const guardiaRoutes = require('./routes/guardiaRoutes');
 
 const app = express();
 
@@ -41,6 +42,7 @@ console.log('Iniciando registro de rutas...');
 app.use('/api/auth', authRoutes);
 app.use('/api/reservas', reservationRoutes);
 app.use('/api/visitantes', visitorRoutes);
+app.use('/api/guardia', guardiaRoutes);
 app.use('/api', notificationRoutes);
 console.log('Rutas registradas exitosamente');
 
