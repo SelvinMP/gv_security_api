@@ -218,12 +218,12 @@ const regenerateVisit = async (req, res) => {
     if (type === 'recurrent') {
       const [original] = await connection.query("SELECT * FROM TBL_VISITANTES_RECURRENTES WHERE ID_VISITANTES_RECURRENTES = ?", [id]);
       if (original.length === 0) return res.status(404).json({ message: "Visita no encontrada" });
-      const v = original[0];
+      const originalVisit = original[0];
 
       const formattedExpiry = moment(newExpiry).format("YYYY-MM-DD HH:mm:ss");
       await connection.query(
         "UPDATE TBL_VISITANTES_RECURRENTES SET FECHA_VENCIMIENTO = ?, NUM_PERSONAS = ?, NUM_PLACA = ?, ESTADO_QR = 0, NOTA = ? WHERE ID_VISITANTES_RECURRENTES = ?",
-        [formattedExpiry, numPersonas || v.NUM_PERSONAS, numPlaca || v.NUM_PLACA, nota !== undefined ? nota : v.NOTA, id]
+        [formattedExpiry, numPersonas || originalVisit.NUM_PERSONAS, numPlaca || originalVisit.NUM_PLACA, nota !== undefined ? nota : originalVisit.NOTA, id]
       );
       
       const [visitor] = await connection.query("SELECT * FROM TBL_VISITANTES_RECURRENTES WHERE ID_VISITANTES_RECURRENTES = ?", [id]);
