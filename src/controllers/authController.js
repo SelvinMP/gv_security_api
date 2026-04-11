@@ -537,6 +537,7 @@ const getUserProfile = async (req, res) => {
     connection = await mysqlPool.getConnection();
     const query = `
       SELECT 
+          u.ID_USUARIO,
           u.NOMBRE_USUARIO,
           u.EMAIL,
           u.PRIMER_INGRESO,
@@ -546,6 +547,7 @@ const getUserProfile = async (req, res) => {
           END AS DOCUMENTO,
           d.DESCRIPCION AS CONDOMINIO,
           c.DESCRIPCION AS CONTACTO,
+          p.ID_PERSONA,
           p.ID_PADRE,
           r.ROL AS ROL
       FROM TBL_MS_USUARIO u
