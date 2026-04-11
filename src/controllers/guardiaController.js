@@ -287,9 +287,46 @@ const confirmEntry = async (req, res) => {
   }
 };
 
+const getResidentDetails = async (req, res) => {
+  const { id } = req.params;
+
+  if (!id) return res.status(400).json({ message: "ID no proporcionado" });
+
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    
+    // Check if the user is a resident (padre/hijo) - Roles might be specific, but generally if they have a TBL_PERSONAS record and ID_ESTADO_PERSONA
+    const [rows] = await connection.query(`
+      SELECT 
+        u.NOMBRE_USUARIO,
+        p.DNI_PERSONA,
+        p.NUM_CARNET_EXTRANJERO,
+        c.DESCRIPCION as CONDOMINIO,
+        ep.DESCRIPCION as ESTADO_RESIDENTE,
+        p.ID_ESTADO_PERSONA
+      FROM TBL_MS_USUARIO u
+      LEFT JOIN TBL_PERSONAS p ON p.ID_USUARIO = u.ID_USUARIO
+      LEFT JOIN TBL_CONDOMINIOS c ON c.ID_CONDOMINIO = p.ID_CONDOMINIO
+      LEFT JOIN TBL_ESTADO_PERSONA ep ON ep.ID_ESTADO_PERSONA = p.ID_ESTADO_PERSONA
+      WHERE u.ID_USUARIO = ?
+    `, [id]);
+
+    if (rows.length === 0) return res.status(404).json({ message: "No se encontró información para este usuario residente." });
+    
+    return res.status(200).json({ data: rows[0] });
+  } catch (error) {
+    console.error("Error al obtener detalles del residente:", error);
+    res.status(500).json({ message: "Error al obtener detalles del residente" });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
 module.exports = {
   loginGuardia,
   getVisitDetails,
   getMotivos,
-  confirmEntry
+  confirmEntry,
+  getResidentDetails
 };
