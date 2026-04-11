@@ -117,6 +117,11 @@ const login = async (req, res) => {
     if (rows.length === 0) return res.status(401).json({ message: "Usuario no encontrado" });
 
     const user = rows[0];
+    
+    if (user.ID_ROL === 3) {
+      return res.status(403).json({ message: "Acceso denegado: Esta aplicación es exclusiva para residentes" });
+    }
+
     switch (user.ID_ESTADO_USUARIO) {
       case 2: return res.status(403).json({ message: "Usuario inactivo" });
       case 3: return res.status(403).json({ message: "Usuario bloqueado" });
