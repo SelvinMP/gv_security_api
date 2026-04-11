@@ -309,8 +309,8 @@ const getResidentDetails = async (req, res) => {
       LEFT JOIN TBL_PERSONAS p ON p.ID_USUARIO = u.ID_USUARIO
       LEFT JOIN TBL_CONDOMINIOS c ON c.ID_CONDOMINIO = p.ID_CONDOMINIO
       LEFT JOIN TBL_ESTADO_PERSONA ep ON ep.ID_ESTADO_PERSONA = p.ID_ESTADO_PERSONA
-      WHERE u.ID_USUARIO = ?
-    `, [id]);
+      WHERE u.ID_USUARIO = ? OR p.ID_PERSONA = ?
+    `, [id, id]);
 
     if (rows.length === 0) return res.status(404).json({ message: "No se encontró información para este usuario residente." });
     
