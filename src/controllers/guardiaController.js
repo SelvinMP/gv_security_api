@@ -314,7 +314,19 @@ const getResidentDetails = async (req, res) => {
 
     if (rows.length === 0) return res.status(404).json({ message: "No se encontró información para este usuario residente." });
     
-    return res.status(200).json({ data: rows[0] });
+    const resident = rows[0];
+
+    // Validación de privacidad: si el estado no es activo (1), no enviamos la información personal
+    if (resident.ID_ESTADO_PERSONA !== 1) {
+      return res.status(200).json({ 
+        data: {
+          ID_ESTADO_PERSONA: resident.ID_ESTADO_PERSONA,
+          ESTADO_RESIDENTE: resident.ESTADO_RESIDENTE || 'DESCONOCIDO'
+        } 
+      });
+    }
+
+    return res.status(200).json({ data: resident });
   } catch (error) {
     console.error("Error al obtener detalles del residente:", error);
     res.status(500).json({ message: "Error al obtener detalles del residente" });
