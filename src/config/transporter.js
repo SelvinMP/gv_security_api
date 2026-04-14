@@ -3,11 +3,10 @@ require('dotenv').config();
 
 const emailPort = parseInt(process.env.EMAIL_PORT) || 587;
 
-// Puerto 465 requiere SSL (secure: true). 587 usa STARTTLS (secure: false).
-// Si EMAIL_SECURE está definido explícitamente, se respeta; de lo contrario se infiere del puerto.
-const isSecure = process.env.EMAIL_SECURE !== undefined
-  ? process.env.EMAIL_SECURE === 'true'
-  : emailPort === 465;
+// Puerto 465 = SSL directo (secure: true)
+// Puerto 587 = STARTTLS (secure: false, conn sube a TLS con STARTTLS)
+// Render bloquea menos el 587. Si el usuario pone 465 lo respetamos.
+const isSecure = emailPort === 465;
 
 const transporter = nodemailer.createTransport({
   host: process.env.EMAIL_HOST || 'smtp.gmail.com',
@@ -18,17 +17,49 @@ const transporter = nodemailer.createTransport({
     pass: process.env.EMAIL_PASS,
   },
   tls: {
-    rejectUnauthorized: false // Ayuda a evitar problemas en entornos con TLS estricto
-  }
+    rejectUnauthorized: false
+  },
+  // ⚠️ Timeouts cortos para evitar que el servidor se cuelgue 120s en Render
+  connectionTimeout: 10000,   // 10s para establecer conexión TCP
+  greetingTimeout: 10000,     // 10s para el saludo SMTP
+  socketTimeout: 15000,       // 15s sin actividad en el socket
 });
 
-// Verificar conexión al arrancar (solo loguea, no detiene el servidor)
+// Verificar conexión al arrancar (solo loguea, no bloquea)
 transporter.verify((error) => {
   if (error) {
     console.error('❌ Error al conectar con el servidor de correo:', error.message);
+    console.error('   HOST:', process.env.EMAIL_HOST, '| PORT:', emailPort, '| SECURE:', isSecure);
+    console.error('   USER:', process.env.EMAIL_USER ? '✓ definido' : '✗ NO definido');
+    console.error('   PASS:', process.env.EMAIL_PASS ? '✓ definido' : '✗ NO definido');
   } else {
-    console.log('✅ Servidor de correo listo para enviar emails');
+    console.log('✅ Servidor de correo listo |', process.env.EMAIL_HOST, 'puerto', emailPort);
   }
 });
 
-module.exports = transporter;
+/**
+ * Wrapper que envía un correo con un timeout máximo.
+ * Si el proveedor SMTP no responde a tiempo, rechaza la promesa
+ * en lugar de colgar el servidor indefinidamente.
+ * @param {object} mailOptions - Opciones de nodemailer
+ * @param {number} timeoutMs   - Timeout máximo en ms (default 12000)
+ */
+const sendMailWithTimeout = (mailOptions, timeoutMs = 12000) => {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Timeout de correo: el servidor SMTP no respondió en ${timeoutMs / 1000}s`));
+    }, timeoutMs);
+
+    transporter.sendMail(mailOptions)
+      .then((info) => {
+        clearTimeout(timer);
+        resolve(info);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+};
+
+module.exports = { transporter, sendMailWithTimeout };
