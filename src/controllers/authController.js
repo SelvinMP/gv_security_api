@@ -1,5 +1,5 @@
 const { mysqlPool } = require('../config/db');
-const transporter = require('../config/transporter');
+const { transporter, sendMailWithTimeout } = require('../config/transporter');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
@@ -91,7 +91,7 @@ const register = async (req, res) => {
         </div>`
     };
 
-    await transporter.sendMail(mailOptions);
+    await sendMailWithTimeout(mailOptions);
     await connection.commit();
 
     const token = jwt.sign({ id: userId }, SECRET_KEY, { expiresIn: 1800 });
@@ -165,10 +165,18 @@ const login = async (req, res) => {
       };
 
       try {
-        await transporter.sendMail(mailOptions);
+        await sendMailWithTimeout(mailOptions);
         return res.status(200).json({ token, id_usuario: user.ID_USUARIO, require2FA: true, message: "Código 2FA enviado" });
       } catch (mailError) {
-        return res.status(500).json({ message: "Error al enviar el código 2FA" });
+        console.error("Error al enviar email 2FA:", mailError.message);
+        // No bloqueamos el login: devolvemos el token y avisamos al cliente
+        return res.status(200).json({
+          token,
+          id_usuario: user.ID_USUARIO,
+          require2FA: true,
+          emailError: true,
+          message: "Código generado pero no se pudo enviar el correo. Contacte al administrador."
+        });
       }
     } else {
       return res.status(200).json({ token, id_usuario: user.ID_USUARIO, require2FA: false, message: "Login exitoso" });
@@ -420,7 +428,7 @@ const notifyAdmins = async (nombre, contacto, condo, isNewAdmin, condoId, esHond
       const [superAdmins] = await mysqlPool.query("SELECT EMAIL FROM TBL_MS_USUARIO WHERE ID_ROL IN (1, 4)");
       if (superAdmins.length > 0) {
         const emailList = superAdmins.map(r => r.EMAIL);
-        await transporter.sendMail({
+        await sendMailWithTimeout({
           from: `"GV-Security" <${process.env.EMAIL_USER}>`,
           to: emailList,
           subject: "Nuevo Administrador de Vivienda Registrado",
@@ -443,7 +451,7 @@ const notifyAdmins = async (nombre, contacto, condo, isNewAdmin, condoId, esHond
       const asunt = "Nuevo integrante registrado en su vivienda";
       const menj = `Hola, un nuevo integrante se ha registrado en su vivienda: ${condo}. Nombre: ${nombre}, Contacto: ${contacto}`;
       
-      await transporter.sendMail({
+      await sendMailWithTimeout({
         from: `"GV-Security" <${process.env.EMAIL_USER}>`,
         to: destinatarios,
         subject: asunt,
@@ -739,7 +747,7 @@ const enviarCodigoRecuperacion = async (req, res) => {
         </div>`
     };
 
-    await transporter.sendMail(mailOptions);
+    await sendMailWithTimeout(mailOptions);
     res.json({ success: true, message: "Código enviado a su correo", id_usuario: rows[0].ID_USUARIO });
   } catch (error) {
     console.error("Error in enviarCodigoRecuperacion:", error);
