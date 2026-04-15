@@ -44,8 +44,9 @@ transporter.verify((error) => {
  * @param {object} mailOptions - Opciones de nodemailer
  * @param {number} timeoutMs   - Timeout máximo en ms (default 12000)
  */
-const sendMailWithTimeout = (mailOptions, timeoutMs = 12000) => {
+const sendMailWithTimeout = (mailOptions, timeoutMs = 30000) => {
   return new Promise((resolve, reject) => {
+    console.log(`📨 Intentando enviar correo a: ${mailOptions.to}...`);
     const timer = setTimeout(() => {
       reject(new Error(`Timeout de correo: el servidor SMTP no respondió en ${timeoutMs / 1000}s`));
     }, timeoutMs);
@@ -53,10 +54,12 @@ const sendMailWithTimeout = (mailOptions, timeoutMs = 12000) => {
     transporter.sendMail(mailOptions)
       .then((info) => {
         clearTimeout(timer);
+        console.log(`✅ Correo enviado con éxito a: ${mailOptions.to}`);
         resolve(info);
       })
       .catch((err) => {
         clearTimeout(timer);
+        console.error(`❌ Error al enviar correo a ${mailOptions.to}:`, err.message);
         reject(err);
       });
   });

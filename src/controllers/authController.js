@@ -407,8 +407,8 @@ const savePersonalData = async (req, res) => {
 
     await connection.commit();
 
-    // 9. Notificar Administradores (Async)
-    notifyAdmins(userRows[0].NOMBRE_USUARIO, contact, condo, isAdminRequired, ID_CONDOMINIO, esHondurena, dni, carnet);
+    // 9. Notificar Administradores (Awaiting for better reliability on Render)
+    await notifyAdmins(userRows[0].NOMBRE_USUARIO, contact, condo, isAdminRequired, ID_CONDOMINIO, esHondurena, dni, carnet);
 
     res.status(200).json({ success: true, message: "Datos guardados correctamente" });
 
