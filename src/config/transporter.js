@@ -30,11 +30,9 @@ const transporter = nodemailer.createTransport({
 transporter.verify((error) => {
   if (error) {
     console.error('❌ Error al conectar con el servidor de correo:', error.message);
-    console.error('   HOST:', process.env.EMAIL_HOST, '| PORT:', emailPort, '| SECURE:', isSecure);
     console.error('   USER:', process.env.EMAIL_USER ? '✓ definido' : '✗ NO definido');
-    console.error('   PASS:', process.env.EMAIL_PASS ? '✓ definido' : '✗ NO definido');
   } else {
-    console.log('✅ Servidor de correo listo |', process.env.EMAIL_HOST, 'puerto', emailPort);
+    console.log('✅ Servidor de correo listo para enviar mensajes.');
   }
 });
 
