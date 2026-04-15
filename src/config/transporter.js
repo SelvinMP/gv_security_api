@@ -1,21 +1,15 @@
 const nodemailer = require('nodemailer');
 const dns = require('dns');
 
-// 🔥 Forzar IPv4 a nivel de proceso para evitar errores ENETUNREACH en Render
+// 🔥 Forzar IPv4 a nivel de proceso desde el inicio absoluto
 if (dns.setDefaultResultOrder) {
   dns.setDefaultResultOrder('ipv4first');
 }
 
 require('dotenv').config();
 
-const emailPort = parseInt(process.env.EMAIL_PORT) || 465;
-const isSecure = emailPort === 465;
-
 const transporter = nodemailer.createTransport({
-  host: process.env.EMAIL_HOST || 'smtp.gmail.com',
-  port: emailPort,
-  secure: isSecure,
-  pool: true, // Mejor estabilidad en conexiones repetidas
+  service: 'gmail', // 🔥 Usar la configuración pre-optimizada para Gmail
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
@@ -25,8 +19,8 @@ const transporter = nodemailer.createTransport({
     rejectUnauthorized: false,
     minVersion: 'TLSv1.2'
   },
-  connectionTimeout: 40000, 
-  greetingTimeout: 40000,   
+  connectionTimeout: 60000, 
+  greetingTimeout: 60000,   
   socketTimeout: 60000,     
   logger: true,                
   debug: true,                 
