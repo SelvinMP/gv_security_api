@@ -11,21 +11,21 @@ const isSecure = emailPort === 465;
 const transporter = nodemailer.createTransport({
   host: process.env.EMAIL_HOST || 'smtp.gmail.com',
   port: emailPort,
-  secure: isSecure,
+  secure: isSecure, // true para 465, false para otros
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
   },
+  family: 4, // 🔥 FORZAR IPv4 para evitar ENETUNREACH en Render
   tls: {
-    rejectUnauthorized: false
+    rejectUnauthorized: false,
+    minVersion: 'TLSv1.2'
   },
-  // ⚠️ Configuraciones para Render/Producción
-  connectionTimeout: 30000,   // 30s para conexión TCP
-  greetingTimeout: 30000,     // 30s para el saludo SMTP
-  socketTimeout: 45000,       // 45s de socket
-  logger: true,                // Muestra logs en consola
-  debug: true,                 // Muestra conversación SMTP
-  requireTLS: emailPort === 587 // Forzar STARTTLS en puerto 587
+  connectionTimeout: 30000, 
+  greetingTimeout: 30000,   
+  socketTimeout: 60000,     
+  logger: true,                
+  debug: true,                 
 });
 
 // Verificar conexión al arrancar (solo loguea, no bloquea)
