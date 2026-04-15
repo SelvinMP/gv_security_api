@@ -1,28 +1,32 @@
 const nodemailer = require('nodemailer');
+const dns = require('dns');
+
+// 🔥 Forzar IPv4 a nivel de proceso para evitar errores ENETUNREACH en Render
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder('ipv4first');
+}
+
 require('dotenv').config();
 
-const emailPort = parseInt(process.env.EMAIL_PORT) || 587;
-
-// Puerto 465 = SSL directo (secure: true)
-// Puerto 587 = STARTTLS (secure: false, conn sube a TLS con STARTTLS)
-// Render bloquea menos el 587. Si el usuario pone 465 lo respetamos.
+const emailPort = parseInt(process.env.EMAIL_PORT) || 465;
 const isSecure = emailPort === 465;
 
 const transporter = nodemailer.createTransport({
   host: process.env.EMAIL_HOST || 'smtp.gmail.com',
   port: emailPort,
-  secure: isSecure, // true para 465, false para otros
+  secure: isSecure,
+  pool: true, // Mejor estabilidad en conexiones repetidas
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
   },
-  family: 4, // 🔥 FORZAR IPv4 para evitar ENETUNREACH en Render
+  family: 4, 
   tls: {
     rejectUnauthorized: false,
     minVersion: 'TLSv1.2'
   },
-  connectionTimeout: 30000, 
-  greetingTimeout: 30000,   
+  connectionTimeout: 40000, 
+  greetingTimeout: 40000,   
   socketTimeout: 60000,     
   logger: true,                
   debug: true,                 
