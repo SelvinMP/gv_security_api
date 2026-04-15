@@ -19,10 +19,13 @@ const transporter = nodemailer.createTransport({
   tls: {
     rejectUnauthorized: false
   },
-  // ⚠️ Timeouts cortos para evitar que el servidor se cuelgue 120s en Render
-  connectionTimeout: 10000,   // 10s para establecer conexión TCP
-  greetingTimeout: 10000,     // 10s para el saludo SMTP
-  socketTimeout: 15000,       // 15s sin actividad en el socket
+  // ⚠️ Configuraciones para Render/Producción
+  connectionTimeout: 30000,   // 30s para conexión TCP
+  greetingTimeout: 30000,     // 30s para el saludo SMTP
+  socketTimeout: 45000,       // 45s de socket
+  logger: true,                // Muestra logs en consola
+  debug: true,                 // Muestra conversación SMTP
+  requireTLS: emailPort === 587 // Forzar STARTTLS en puerto 587
 });
 
 // Verificar conexión al arrancar (solo loguea, no bloquea)
