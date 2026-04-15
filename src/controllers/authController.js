@@ -224,12 +224,13 @@ const verify2FA = async (req, res) => {
     // Éxito: Resetear intentos y limpiar código
     await connection.query("UPDATE TBL_MS_USUARIO SET CODIGO_VERIFICACION = NULL, INTENTOS_FALLIDOS = 0, PRIMER_INGRESO_COMPLETADO = 1 WHERE ID_USUARIO = ?", [id_usuario]);
     
-    const token = jwt.sign({ id: id_usuario }, SECRET_KEY, { expiresIn: 5400 }); 
+    const token = jwt.sign({ id: id_usuario }, SECRET_KEY, { expiresIn: '2h' }); 
     
     res.status(200).json({ 
       success: true, 
       token, 
       id_usuario: id_usuario,
+      require2FA: false,
       redirect: "/dashboard",
       message: "Acceso concedido" 
     });
