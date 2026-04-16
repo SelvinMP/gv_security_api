@@ -837,17 +837,28 @@ const changePassword = async (req, res) => {
 
 const saveFCMToken = async (req, res) => {
   const { id_usuario, fcm_token } = req.body;
+  
+  console.log(`[FCM] Intentando guardar token para usuario ${id_usuario}`);
+  
   if (!id_usuario || !fcm_token) {
+    console.warn(`[FCM] Datos incompletos: id_usuario=${id_usuario}, fcm_token=${fcm_token ? 'OK' : 'MISSING'}`);
     return res.status(400).json({ message: "ID de usuario y Token son requeridos" });
   }
 
   let connection;
   try {
     connection = await mysqlPool.getConnection();
-    await connection.query("UPDATE TBL_MS_USUARIO SET FCM_TOKEN = ? WHERE ID_USUARIO = ?", [fcm_token, id_usuario]);
+    const [result] = await connection.query("UPDATE TBL_MS_USUARIO SET FCM_TOKEN = ? WHERE ID_USUARIO = ?", [fcm_token, id_usuario]);
+    
+    if (result.affectedRows === 0) {
+      console.warn(`[FCM] No se encontró el usuario ${id_usuario} para actualizar el token.`);
+      return res.status(404).json({ success: false, message: "Usuario no encontrado" });
+    }
+
+    console.log(`[FCM] Token guardado exitosamente para usuario ${id_usuario}`);
     res.json({ success: true, message: "Token FCM guardado correctamente" });
   } catch (error) {
-    console.error("Error in saveFCMToken:", error);
+    console.error("[FCM] Error al guardar el token en la DB:", error);
     res.status(500).json({ message: "Error al guardar el token" });
   } finally {
     if (connection) connection.release();
