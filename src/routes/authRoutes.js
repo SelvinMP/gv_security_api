@@ -19,6 +19,6 @@ router.get('/nationalities', authController.getNationalities);
 router.get('/contact-types', authController.getContactTypes);
 router.get('/relationships', authController.getRelationships);
 router.get('/condos', authController.getCondos);
-router.post('/change-password', authController.changePassword);
+router.post('/save-fcm-token', authController.saveFCMToken);
 
 module.exports = router;

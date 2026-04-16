@@ -63,7 +63,37 @@ const hideAnnouncement = async (req, res) => {
   }
 };
 
+/**
+ * Obtiene las notificaciones personales de un usuario (de la tabla TBL_NOTIFICACIONES_APP).
+ */
+const getPersonalNotifications = async (req, res) => {
+  const { usuarioId } = req.params;
+
+  if (!usuarioId) {
+    return res.status(400).json({ message: "El ID de usuario es requerido" });
+  }
+
+  const query = `
+    SELECT ID_NOTIFICACION, TITULO, MENSAJE as DESCRIPCION, FECHA_HORA, LEIDA 
+    FROM TBL_NOTIFICACIONES_APP 
+    WHERE ID_USUARIO = ? 
+    ORDER BY FECHA_HORA DESC`;
+
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const [results] = await connection.query(query, [usuarioId]);
+    res.status(200).json(results);
+  } catch (error) {
+    console.error("Error al obtener notificaciones personales:", error);
+    res.status(500).json({ message: "Error al obtener notificaciones" });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
 module.exports = {
   getAnnouncements,
-  hideAnnouncement
+  hideAnnouncement,
+  getPersonalNotifications
 };
