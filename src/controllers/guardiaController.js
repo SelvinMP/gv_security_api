@@ -7,6 +7,44 @@ const transporter = require('../config/transporter');
 
 const SECRET_KEY = process.env.SECRET_KEY || 'your_secret_key';
 
+const loginGuardia = async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ message: "Usuario y contraseña son requeridos" });
+
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const [rows] = await connection.query("SELECT * FROM TBL_MS_USUARIO WHERE EMAIL = ?", [username]);
+    if (rows.length === 0) return res.status(401).json({ message: "Usuario no encontrado" });
+
+    const user = rows[0];
+
+    // Verificar que sea Guardia (Rol 3)
+    if (user.ID_ROL !== 3) {
+      return res.status(403).json({ message: "Acceso denegado. Solo para Guardias de Seguridad." });
+    }
+
+    switch (user.ID_ESTADO_USUARIO) {
+      case 2: return res.status(403).json({ message: "Usuario inactivo" });
+      case 3: return res.status(403).json({ message: "Usuario bloqueado" });
+    }
+
+    const passwordIsValid = await bcrypt.compare(password, user.CONTRASEÑA);
+    if (!passwordIsValid) {
+      return res.status(401).json({ message: "Contraseña incorrecta" });
+    }
+
+    const token = jwt.sign({ id: user.ID_USUARIO, role: user.ID_ROL }, SECRET_KEY, { expiresIn: '8h' });
+
+    return res.status(200).json({ token, id_usuario: user.ID_USUARIO, role: user.ID_ROL, message: "Login exitoso" });
+  } catch (err) {
+    console.error("Error en loginGuardia:", err);
+    res.status(500).json({ message: "Error interno del servidor" });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
 // Helper: Extraer ID del guardia desde el token JWT o los parámetros de la petición
 const getGuardiaIdFromReq = (req) => {
   try {
