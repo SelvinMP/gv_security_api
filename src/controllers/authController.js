@@ -117,10 +117,6 @@ const login = async (req, res) => {
     if (rows.length === 0) return res.status(401).json({ message: "Usuario no encontrado" });
 
     const user = rows[0];
-    
-    if (user.ID_ROL === 3) {
-      return res.status(403).json({ message: "Acceso denegado: Esta aplicación es exclusiva para residentes" });
-    }
 
     switch (user.ID_ESTADO_USUARIO) {
       case 2: return res.status(403).json({ message: "Usuario inactivo" });
@@ -131,19 +127,22 @@ const login = async (req, res) => {
 
     const passwordIsValid = await bcrypt.compare(password, user.CONTRASEÑA);
     if (!passwordIsValid) {
-      await connection.query("UPDATE TBL_MS_USUARIO SET INTENTOS_FALLIDOS = INTENTOS_FALLIDOS + 1 WHERE EMAIL = ?", [username]);
-      const [paramRows] = await connection.query("SELECT VALOR FROM TBL_MS_PARAMETROS WHERE PARAMETRO = ?", ["INTENTOS_FALLIDOS"]);
-      const maxLoginAttempts = paramRows.length > 0 ? parseInt(paramRows[0].VALOR, 10) : 3;
-      if (user.INTENTOS_FALLIDOS + 1 >= maxLoginAttempts) {
-        await connection.query("UPDATE TBL_MS_USUARIO SET ID_ESTADO_USUARIO = 3 WHERE EMAIL = ?", [username]);
-        return res.status(403).json({ message: "Usuario bloqueado por múltiples intentos fallidos" });
-      } else {
-        return res.status(401).json({ message: "Contraseña incorrecta" });
+      // Los guardias (Rol 3) no tienen límite de intentos fallidos configurados en la misma tabla
+      if (user.ID_ROL !== 3) {
+        await connection.query("UPDATE TBL_MS_USUARIO SET INTENTOS_FALLIDOS = INTENTOS_FALLIDOS + 1 WHERE EMAIL = ?", [username]);
+        const [paramRows] = await connection.query("SELECT VALOR FROM TBL_MS_PARAMETROS WHERE PARAMETRO = ?", ["INTENTOS_FALLIDOS"]);
+        const maxLoginAttempts = paramRows.length > 0 ? parseInt(paramRows[0].VALOR, 10) : 3;
+        if (user.INTENTOS_FALLIDOS + 1 >= maxLoginAttempts) {
+          await connection.query("UPDATE TBL_MS_USUARIO SET ID_ESTADO_USUARIO = 3 WHERE EMAIL = ?", [username]);
+          return res.status(403).json({ message: "Usuario bloqueado por múltiples intentos fallidos" });
+        }
       }
+      return res.status(401).json({ message: "Contraseña incorrecta" });
     }
 
     await connection.query(`UPDATE TBL_MS_USUARIO SET INTENTOS_FALLIDOS = 0, PRIMER_INGRESO = IF(PRIMER_INGRESO IS NULL, NOW(), PRIMER_INGRESO) WHERE EMAIL = ?`, [username]);
-    const token = jwt.sign({ id: user.ID_USUARIO }, SECRET_KEY, { expiresIn: '2h' });
+    // Incluir el rol en el JWT para que el frontend pueda usarlo en protección de rutas
+    const token = jwt.sign({ id: user.ID_USUARIO, role: user.ID_ROL }, SECRET_KEY, { expiresIn: '2h' });
 
     if (Number(user.CODIGO_2FA) === 1) {
       const verificationCode = crypto.randomBytes(3).toString("hex").toUpperCase();
@@ -166,20 +165,21 @@ const login = async (req, res) => {
 
       try {
         await sendMailWithTimeout(mailOptions);
-        return res.status(200).json({ token, id_usuario: user.ID_USUARIO, require2FA: true, message: "Código 2FA enviado" });
+        return res.status(200).json({ token, id_usuario: user.ID_USUARIO, role: user.ID_ROL, require2FA: true, message: "Código 2FA enviado" });
       } catch (mailError) {
         console.error("Error al enviar email 2FA:", mailError.message);
         // No bloqueamos el login: devolvemos el token y avisamos al cliente
         return res.status(200).json({
           token,
           id_usuario: user.ID_USUARIO,
+          role: user.ID_ROL,
           require2FA: true,
           emailError: true,
           message: "Código generado pero no se pudo enviar el correo. Contacte al administrador."
         });
       }
     } else {
-      return res.status(200).json({ token, id_usuario: user.ID_USUARIO, require2FA: false, message: "Login exitoso" });
+      return res.status(200).json({ token, id_usuario: user.ID_USUARIO, role: user.ID_ROL, require2FA: false, message: "Login exitoso" });
     }
   } catch (err) {
     console.error("Error en login:", err);
@@ -424,72 +424,69 @@ const savePersonalData = async (req, res) => {
 // Función auxiliar para notificaciones (sin bloquear respuesta)
 const notifyAdmins = async (nombre, contacto, condo, isNewAdmin, condoId, esHondurena, dni, carnet) => {
   try {
-    // 1. Notificar a SuperAdmins si es nuevo admin de casa
-    if (isNewAdmin) {
-      const [superAdmins] = await mysqlPool.query("SELECT EMAIL FROM TBL_MS_USUARIO WHERE ID_ROL IN (1, 4)");
-      if (superAdmins.length > 0) {
-        const emailList = superAdmins.map(r => r.EMAIL);
-        await sendMailWithTimeout({
-          from: `"GV-Security" <${process.env.EMAIL_USER}>`,
-          to: emailList,
-          subject: "Nuevo Administrador de Vivienda Registrado",
-          html: `<p>Se ha registrado un nuevo administrador global para la vivienda: <strong>${condo}</strong>.</p><p>Nombre: ${nombre}</p><p>Contacto: ${contacto}</p>`
-        });
-      }
-    }
-
-    // 2. Notificar a Admins de la misma vivienda
-    const [condoAdmins] = await mysqlPool.query(
-      `SELECT u.ID_USUARIO, u.EMAIL, u.FCM_TOKEN FROM TBL_MS_USUARIO u 
-       JOIN TBL_PERSONAS p ON u.ID_USUARIO = p.ID_USUARIO 
-       WHERE p.ID_CONDOMINIO = ? AND p.ID_PADRE = 1`, [condoId]
+    // 1. Definir los destinatarios
+    // Queremos notificar a:
+    // a) Admins de la misma vivienda (ID_PADRE = 1)
+    // b) Administradores de la residencial (ROL 1 y ROL 4)
+    
+    const [allAdmins] = await mysqlPool.query(
+      `SELECT DISTINCT u.ID_USUARIO, u.EMAIL, u.FCM_TOKEN, u.ID_ROL 
+       FROM TBL_MS_USUARIO u 
+       LEFT JOIN TBL_PERSONAS p ON u.ID_USUARIO = p.ID_USUARIO 
+       WHERE (p.ID_CONDOMINIO = ? AND p.ID_PADRE = 1) 
+       OR u.ID_ROL IN (1, 4)`, [condoId]
     );
 
-    if (condoAdmins.length > 0) {
-      // 2.a Notificación por Correo
-      const destinatarios = condoAdmins.map(c => c.EMAIL);
-      const docInfo = esHondurena ? `<p>DNI: ${dni}</p>` : `<p>Carnet: ${carnet}</p>`;
-      const asunt = "Nuevo integrante registrado en su vivienda";
-      const menj = `Hola, un nuevo integrante se ha registrado en su vivienda: ${condo}. Nombre: ${nombre}, Contacto: ${contacto}`;
-      
+    if (allAdmins.length === 0) return;
+
+    const asunt = "Nuevo integrante registrado";
+    const menj = `Un nuevo integrante se ha registrado en la vivienda: ${condo}. Nombre: ${nombre}, Contacto: ${contacto}`;
+    const docInfo = esHondurena ? `DNI: ${dni}` : `Carnet: ${carnet}`;
+    const fullHtml = `<p>${menj}</p><p>${docInfo}</p>`;
+
+    // 2. Notificación por Correo (a todos los administradores encontrados)
+    const emailList = allAdmins.map(r => r.EMAIL).filter(Boolean);
+    if (emailList.length > 0) {
       await sendMailWithTimeout({
         from: `"GV-Security" <${process.env.EMAIL_USER}>`,
-        to: destinatarios,
+        to: emailList,
         subject: asunt,
-        html: `<p>${menj}</p>${docInfo}`
+        html: fullHtml
       });
+    }
 
-      // 2.b Guardar en Base de Datos e Intentar Notification Push (Firebase)
-      const TokensFCM = [];
-      for (const destinatario of condoAdmins) {
-        // Insertar registro para que se vea dentro de la App ("Alertas")
-        await mysqlPool.query(
-          "INSERT INTO TBL_NOTIFICACIONES_APP (ID_USUARIO, TITULO, MENSAJE, FECHA_HORA, LEIDA) VALUES (?, ?, ?, NOW(), 0)",
-          [destinatario.ID_USUARIO, asunt, menj]
-        );
+    // 3. Notificación en la App (Sección Alertas) y Push FCM
+    const TokensFCM = [];
+    
+    for (const adminUser of allAdmins) {
+      // Insertar registro para que se vea dentro de la App ("Alertas")
+      await mysqlPool.query(
+        "INSERT INTO TBL_NOTIFICACIONES_APP (ID_USUARIO, TITULO, MENSAJE, FECHA_HORA, LEIDA) VALUES (?, ?, ?, NOW(), 0)",
+        [adminUser.ID_USUARIO, `ALERTA: ${asunt}`, menj]
+      );
 
-        // Agrupar los tokens para mandar Push Multi-Cast (celulares)
-        if (destinatario.FCM_TOKEN) {
-          TokensFCM.push(destinatario.FCM_TOKEN);
-        }
-      }
-
-      // 2.c Enviar Push vía Firebase Cloud Messaging
-      if (TokensFCM.length > 0 && admin.apps.length > 0) {
-        const message = {
-          notification: {
-            title: asunt,
-            body: menj,
-          },
-          tokens: TokensFCM // Arreglo de tokens celulares validos
-        };
-        admin.messaging().sendEachForMulticast(message)
-          .then((response) => console.log(response.successCount + ' mensajes FCM enviados correctamente.'))
-          .catch((error) => console.error('Error enviando push FCM:', error));
+      // Agrupar tokens para mandar Push
+      if (adminUser.FCM_TOKEN) {
+        TokensFCM.push(adminUser.FCM_TOKEN);
       }
     }
+
+    // 4. Enviar Push vía Firebase Cloud Messaging
+    if (TokensFCM.length > 0 && admin.apps.length > 0) {
+      const message = {
+        notification: {
+          title: `ALERTA: ${asunt}`,
+          body: menj,
+        },
+        tokens: TokensFCM
+      };
+      admin.messaging().sendEachForMulticast(message)
+        .then((response) => console.log(`[FCM] ${response.successCount} mensajes enviados correctamente.`))
+        .catch((error) => console.error('[FCM] Error enviando push:', error));
+    }
+
   } catch (err) {
-    console.error("Error enviando notificaciones:", err);
+    console.error("Error en notifyAdmins:", err);
   }
 };
 
