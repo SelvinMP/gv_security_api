@@ -7,39 +7,214 @@ const transporter = require('../config/transporter');
 
 const SECRET_KEY = process.env.SECRET_KEY || 'your_secret_key';
 
-const loginGuardia = async (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ message: "Usuario y contraseña son requeridos" });
+// Helper: Extraer ID del guardia desde el token JWT o los parámetros de la petición
+const getGuardiaIdFromReq = (req) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.split(' ')[1];
+      const decoded = jwt.verify(token, SECRET_KEY);
+      if (decoded && decoded.id) return decoded.id;
+    }
+  } catch (e) {
+    // Si no es token válido, continuar con query / body
+  }
+
+  return req.body?.guardiaId || req.body?.idGuardia || req.body?.id_usuario ||
+         req.query?.guardiaId || req.query?.idGuardia || req.query?.id_usuario || null;
+};
+
+// Helper: Registrar intento fallido de escaneo en TBL_LOG_ESCANEO_FALLIDO
+const registrarLogFallido = async (connection, {
+  guardiaId,
+  idVisitante = null,
+  idVisitanteRecurrente = null,
+  latitud = null,
+  longitud = null,
+  distancia = null,
+  precision = null,
+  motivo,
+  req
+}) => {
+  try {
+    if (!guardiaId) {
+      console.warn("Log fallido omitido: No se pudo identificar el guardia.");
+      return;
+    }
+
+    const clientIp = (req ? (req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || req.ip || '') : '').slice(0, 45);
+    const userAgent = (req ? (req.headers['user-agent'] || '') : '').slice(0, 255);
+    const motivoTruncado = (motivo || 'Rechazado por política de geocerca').slice(0, 150);
+
+    await connection.query(`
+      INSERT INTO TBL_LOG_ESCANEO_FALLIDO 
+      (ID_USUARIO_GUARDIA, ID_VISITANTE, ID_VISITANTES_RECURRENTES, LATITUD_INTENTO, LONGITUD_INTENTO, DISTANCIA_METROS, PRECISION_GPS, MOTIVO_RECHAZO, ORIGEN_IP, DISPOSITIVO)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      guardiaId,
+      idVisitante || null,
+      idVisitanteRecurrente || null,
+      latitud || null,
+      longitud || null,
+      distancia || null,
+      precision || null,
+      motivoTruncado,
+      clientIp || null,
+      userAgent || null
+    ]);
+  } catch (err) {
+    console.error("Error al registrar en TBL_LOG_ESCANEO_FALLIDO:", err.message);
+  }
+};
+
+// Helper: Comprobar si el guardia se encuentra dentro de una geocerca activa
+const checkGeocerca = async (connection, {
+  latitud,
+  longitud,
+  precision,
+  guardiaId,
+  idVisitante = null,
+  idVisitanteRecurrente = null,
+  req
+}) => {
+  // 1. Obtener parámetros globales de geocerca
+  const [paramRows] = await connection.query(
+    "SELECT PARAMETRO, VALOR FROM TBL_MS_PARAMETROS WHERE PARAMETRO IN ('GEOCERCA_ACTIVA', 'PRECISION_MAXIMA_GPS_METROS')"
+  );
+
+  const params = {};
+  paramRows.forEach(p => { params[p.PARAMETRO] = p.VALOR; });
+
+  const geocercaActiva = params['GEOCERCA_ACTIVA'] === '1';
+  const precisionMaxima = parseFloat(params['PRECISION_MAXIMA_GPS_METROS']) || 40.0;
+
+  if (!geocercaActiva) {
+    return { allowed: true, geocercaActiva: false };
+  }
+
+  // 2. Validar que vengan coordenadas GPS
+  if (latitud === undefined || latitud === null || longitud === undefined || longitud === null ||
+      latitud === '' || longitud === '' || isNaN(parseFloat(latitud)) || isNaN(parseFloat(longitud))) {
+    await registrarLogFallido(connection, {
+      guardiaId,
+      idVisitante,
+      idVisitanteRecurrente,
+      motivo: 'GPS no proporcionado o desactivado',
+      req
+    });
+    return {
+      allowed: false,
+      message: 'Ubicación GPS requerida. Debe activar la ubicación GPS en su dispositivo para escanear en caseta.'
+    };
+  }
+
+  const latNum = parseFloat(latitud);
+  const lngNum = parseFloat(longitud);
+  const precNum = (precision !== undefined && precision !== null && precision !== '' && !isNaN(parseFloat(precision)))
+    ? parseFloat(precision)
+    : null;
+
+  // 3. Validar precisión de la señal GPS
+  if (precNum !== null && precNum > precisionMaxima) {
+    await registrarLogFallido(connection, {
+      guardiaId,
+      idVisitante,
+      idVisitanteRecurrente,
+      latitud: latNum,
+      longitud: lngNum,
+      precision: precNum,
+      motivo: `Baja precisión GPS (${Math.round(precNum)}m > máx ${precisionMaxima}m)`,
+      req
+    });
+    return {
+      allowed: false,
+      message: `Precisión de GPS insuficiente (${Math.round(precNum)} metros). Debe ser menor a ${precisionMaxima}m. Espere una mejor señal de satélite o acérquese a la caseta.`
+    };
+  }
+
+  // 4. Consultar geocerca activa más cercana mediante ST_Distance_Sphere
+  const [geoRows] = await connection.query(`
+    SELECT 
+        ID_GEOCERCA,
+        NOMBRE_ZONA,
+        RADIO_METROS,
+        ROUND(
+            ST_Distance_Sphere(
+                POINT(LONGITUD_CENTRO, LATITUD_CENTRO),
+                POINT(?, ?)
+            ), 2
+        ) AS DISTANCIA_ACTUAL_METROS,
+        CASE 
+            WHEN ST_Distance_Sphere(
+                POINT(LONGITUD_CENTRO, LATITUD_CENTRO),
+                POINT(?, ?)
+            ) <= RADIO_METROS THEN 1 
+            ELSE 0 
+        END AS DENTRO_DE_AREA
+    FROM TBL_GEOCERCAS
+    WHERE ACTIVO = 1
+    ORDER BY DISTANCIA_ACTUAL_METROS ASC
+    LIMIT 1;
+  `, [lngNum, latNum, lngNum, latNum]);
+
+  if (geoRows.length === 0) {
+    return { allowed: true, geocercaActiva: true, noActiveGeocercas: true };
+  }
+
+  const geocerca = geoRows[0];
+
+  if (geocerca.DENTRO_DE_AREA !== 1) {
+    await registrarLogFallido(connection, {
+      guardiaId,
+      idVisitante,
+      idVisitanteRecurrente,
+      latitud: latNum,
+      longitud: lngNum,
+      distancia: geocerca.DISTANCIA_ACTUAL_METROS,
+      precision: precNum,
+      motivo: `Fuera de geocerca (${geocerca.NOMBRE_ZONA}). Distancia: ${geocerca.DISTANCIA_ACTUAL_METROS}m (Máx: ${geocerca.RADIO_METROS}m)`,
+      req
+    });
+    return {
+      allowed: false,
+      message: `Acceso restringido: Se encuentra fuera del área permitida (${geocerca.NOMBRE_ZONA}). Distancia actual: ${Math.round(geocerca.DISTANCIA_ACTUAL_METROS)}m (Máximo permitido: ${Math.round(geocerca.RADIO_METROS)}m).`,
+      distancia: geocerca.DISTANCIA_ACTUAL_METROS,
+      radio: geocerca.RADIO_METROS,
+      zona: geocerca.NOMBRE_ZONA
+    };
+  }
+
+  return {
+    allowed: true,
+    geocercaActiva: true,
+    idGeocerca: geocerca.ID_GEOCERCA,
+    nombreZona: geocerca.NOMBRE_ZONA,
+    distancia: geocerca.DISTANCIA_ACTUAL_METROS,
+    radio: geocerca.RADIO_METROS,
+    latitud: latNum,
+    longitud: lngNum,
+    precision: precNum
+  };
+};
+
+const checkGuardiaLocation = async (req, res) => {
+  const { latitud, longitud, precision } = req.query;
+  const guardiaId = getGuardiaIdFromReq(req);
 
   let connection;
   try {
     connection = await mysqlPool.getConnection();
-    const [rows] = await connection.query("SELECT * FROM TBL_MS_USUARIO WHERE EMAIL = ?", [username]);
-    if (rows.length === 0) return res.status(401).json({ message: "Usuario no encontrado" });
-
-    const user = rows[0];
-
-    // Verificar que sea Guardia (Rol 3)
-    if (user.ID_ROL !== 3) {
-      return res.status(403).json({ message: "Acceso denegado. Solo para Guardias de Seguridad." });
-    }
-
-    switch (user.ID_ESTADO_USUARIO) {
-      case 2: return res.status(403).json({ message: "Usuario inactivo" });
-      case 3: return res.status(403).json({ message: "Usuario bloqueado" });
-    }
-
-    const passwordIsValid = await bcrypt.compare(password, user.CONTRASEÑA);
-    if (!passwordIsValid) {
-      return res.status(401).json({ message: "Contraseña incorrecta" });
-    }
-
-    const token = jwt.sign({ id: user.ID_USUARIO, role: user.ID_ROL }, SECRET_KEY, { expiresIn: '8h' });
-
-    return res.status(200).json({ token, id_usuario: user.ID_USUARIO, role: user.ID_ROL, message: "Login exitoso" });
-  } catch (err) {
-    console.error("Error en loginGuardia:", err);
-    res.status(500).json({ message: "Error interno del servidor" });
+    const result = await checkGeocerca(connection, {
+      latitud,
+      longitud,
+      precision,
+      guardiaId,
+      req
+    });
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error("Error en checkGuardiaLocation:", error);
+    return res.status(500).json({ message: "Error al verificar geocerca" });
   } finally {
     if (connection) connection.release();
   }
@@ -47,13 +222,35 @@ const loginGuardia = async (req, res) => {
 
 const getVisitDetails = async (req, res) => {
   const { id } = req.params;
-  const { isRecurrent } = req.query;
+  const { isRecurrent, latitud, longitud, precision } = req.query;
+  const guardiaId = getGuardiaIdFromReq(req);
 
   if (!id) return res.status(400).json({ message: "ID no proporcionado" });
 
   let connection;
   try {
     connection = await mysqlPool.getConnection();
+
+    // Validar Geocerca
+    const geoValidation = await checkGeocerca(connection, {
+      latitud,
+      longitud,
+      precision,
+      guardiaId,
+      idVisitante: isRecurrent === 'true' ? null : id,
+      idVisitanteRecurrente: isRecurrent === 'true' ? id : null,
+      req
+    });
+
+    if (!geoValidation.allowed) {
+      return res.status(403).json({
+        message: geoValidation.message,
+        geocercaError: true,
+        distancia: geoValidation.distancia,
+        radio: geoValidation.radio,
+        zona: geoValidation.zona
+      });
+    }
     
     if (isRecurrent === 'true') {
       const [rows] = await connection.query(`
@@ -84,7 +281,7 @@ const getVisitDetails = async (req, res) => {
       const vencimiento = moment(rows[0].FECHA_VENCIMIENTO);
       if (moment().isAfter(vencimiento)) return res.status(400).json({ message: "La fecha de validez de este código QR de visita recurrente ya venció o caducó." });
       
-      return res.status(200).json({ data: rows[0], isRecurrent: true });
+      return res.status(200).json({ data: rows[0], isRecurrent: true, geocerca: geoValidation });
     } else {
       const [rows] = await connection.query(`
         SELECT 
@@ -111,7 +308,7 @@ const getVisitDetails = async (req, res) => {
       if (rows.length === 0) return res.status(404).json({ message: "No se encontró información para este código QR." });
       if (rows[0].ESTADO_QR === 1) return res.status(400).json({ message: "Este código QR de ingreso único ya fue utilizado o escaneado anteriormente." });
       
-      return res.status(200).json({ data: rows[0], isRecurrent: false });
+      return res.status(200).json({ data: rows[0], isRecurrent: false, geocerca: geoValidation });
     }
   } catch (error) {
     console.error("Error al obtener visita:", error);
@@ -143,8 +340,14 @@ const confirmEntry = async (req, res) => {
     numPlaca, 
     nacionalidadId, 
     documento,
-    motivoId
+    motivoId,
+    idGeocerca,
+    latitud,
+    longitud,
+    distanciaMetros,
+    precision
   } = req.body;
+  const guardiaId = getGuardiaIdFromReq(req);
 
   let connection;
   try {
@@ -186,13 +389,32 @@ const confirmEntry = async (req, res) => {
         WHERE ID_VISITANTES_RECURRENTES = ?
       `, [now, numPersonas, numPlaca, nacionalidadId, dni, carnet, id]);
 
-      // Insert Bitácora
+      // Insert Bitácora con datos de auditoría de guardia y geocerca
       const [personaRows] = await connection.query("SELECT ID_PERSONA FROM TBL_PERSONAS WHERE ID_USUARIO = ?", [userId]);
       const idPersona = personaRows[0]?.ID_PERSONA || null;
       await connection.query(`
-        INSERT INTO TBL_BITACORA_VISITA (ID_PERSONA, ID_VISITANTES_RECURRENTES, NUM_PERSONA, NUM_PLACA, NOTA, FECHA_HORA, FECHA_ACCESO, FECHA_VENCIMIENTO)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `, [idPersona, id, numPersonas, numPlaca, visitorData.NOTA || null, visitorData.FECHA_HORA, now, visitorData.FECHA_VENCIMIENTO]);
+        INSERT INTO TBL_BITACORA_VISITA (
+          ID_PERSONA, ID_VISITANTES_RECURRENTES, ID_USUARIO_GUARDIA, ID_GEOCERCA,
+          NUM_PERSONA, NUM_PLACA, NOTA, FECHA_HORA, FECHA_ACCESO, FECHA_VENCIMIENTO,
+          LATITUD_ESCANEO, LONGITUD_ESCANEO, DISTANCIA_METROS, PRECISION_GPS
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+        idPersona, 
+        id, 
+        guardiaId || null, 
+        idGeocerca || null, 
+        numPersonas, 
+        numPlaca, 
+        visitorData.NOTA || null, 
+        visitorData.FECHA_HORA, 
+        now, 
+        visitorData.FECHA_VENCIMIENTO,
+        latitud || null,
+        longitud || null,
+        distanciaMetros || null,
+        precision || null
+      ]);
 
     } else {
       const [visitorRes] = await connection.query("SELECT * FROM TBL_REGVISITAS WHERE ID_VISITANTE = ?", [id]);
@@ -207,12 +429,26 @@ const confirmEntry = async (req, res) => {
         WHERE ID_VISITANTE = ?
       `, [now, numPersonas, numPlaca, nacionalidadId, dni, carnet, id]);
 
-      // Update Bitácora (It usually gets created on visit creation, we could either update it or add a new record. The plan said 'Logs the entry in TBL_BITACORA_VISITA' but bitacora is usually created at qr gen. Let's update FECHA_ACCESO in bitacora)
+      // Update Bitácora con datos de auditoría de guardia y geocerca
       await connection.query(`
         UPDATE TBL_BITACORA_VISITA
-        SET FECHA_ACCESO = ?, NUM_PERSONA = ?, NUM_PLACA = ?
+        SET FECHA_ACCESO = ?, NUM_PERSONA = ?, NUM_PLACA = ?,
+            ID_USUARIO_GUARDIA = ?, ID_GEOCERCA = ?,
+            LATITUD_ESCANEO = ?, LONGITUD_ESCANEO = ?,
+            DISTANCIA_METROS = ?, PRECISION_GPS = ?
         WHERE ID_VISITANTE = ?
-      `, [now, numPersonas, numPlaca, id]);
+      `, [
+        now, 
+        numPersonas, 
+        numPlaca, 
+        guardiaId || null, 
+        idGeocerca || null, 
+        latitud || null, 
+        longitud || null, 
+        distanciaMetros || null, 
+        precision || null, 
+        id
+      ]);
     }
 
     await connection.commit();
@@ -289,14 +525,35 @@ const confirmEntry = async (req, res) => {
 
 const getResidentDetails = async (req, res) => {
   const { id } = req.params;
+  const { latitud, longitud, precision } = req.query;
+  const guardiaId = getGuardiaIdFromReq(req);
 
   if (!id) return res.status(400).json({ message: "ID no proporcionado" });
 
   let connection;
   try {
     connection = await mysqlPool.getConnection();
+
+    // Validar Geocerca
+    const geoValidation = await checkGeocerca(connection, {
+      latitud,
+      longitud,
+      precision,
+      guardiaId,
+      req
+    });
+
+    if (!geoValidation.allowed) {
+      return res.status(403).json({
+        message: geoValidation.message,
+        geocercaError: true,
+        distancia: geoValidation.distancia,
+        radio: geoValidation.radio,
+        zona: geoValidation.zona
+      });
+    }
     
-    // Check if the user is a resident (padre/hijo) - Roles might be specific, but generally if they have a TBL_PERSONAS record and ID_ESTADO_PERSONA
+    // Check if the user is a resident (padre/hijo)
     const [rows] = await connection.query(`
       SELECT 
         u.NOMBRE_USUARIO,
@@ -322,11 +579,12 @@ const getResidentDetails = async (req, res) => {
         data: {
           ID_ESTADO_PERSONA: resident.ID_ESTADO_PERSONA,
           ESTADO_RESIDENTE: resident.ESTADO_RESIDENTE || 'DESCONOCIDO'
-        } 
+        },
+        geocerca: geoValidation
       });
     }
 
-    return res.status(200).json({ data: resident });
+    return res.status(200).json({ data: resident, geocerca: geoValidation });
   } catch (error) {
     console.error("Error al obtener detalles del residente:", error);
     res.status(500).json({ message: "Error al obtener detalles del residente" });
@@ -340,5 +598,6 @@ module.exports = {
   getVisitDetails,
   getMotivos,
   confirmEntry,
-  getResidentDetails
+  getResidentDetails,
+  checkGuardiaLocation
 };
