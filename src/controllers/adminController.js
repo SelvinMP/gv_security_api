@@ -533,6 +533,112 @@ const getMaintenanceTable = async (req, res) => {
         return res.status(200).json({ success: true, table: 'bitacoras', data: rows });
       }
 
+      case 'logs_usuarios': {
+        const [rows] = await connection.query(`
+          SELECT 
+            lu.ID_LOG_USUARIO,
+            lu.NOMBRE_USUARIO,
+            lu.EMAIL,
+            COALESCE(r.ROL, 'Usuario') AS ROL,
+            lu.FECHA_ELIMINACION,
+            COALESCE(lu.USUARIO_ELIMINACION, 'Sistema') AS USUARIO_ELIMINACION,
+            COALESCE(lu.ORIGEN_IP, 'Desconocida') AS ORIGEN_IP,
+            COALESCE(lu.NAVEGADOR, 'Navegador web') AS NAVEGADOR
+          FROM TBL_LOG_USUARIO lu
+          LEFT JOIN TBL_MS_ROLES r ON lu.ID_ROL = r.ID_ROL
+          ORDER BY lu.FECHA_ELIMINACION DESC
+          LIMIT 200;
+        `);
+        return res.status(200).json({ success: true, table, data: rows });
+      }
+
+      case 'logs_personas': {
+        const [rows] = await connection.query(`
+          SELECT 
+            lp.ID_LOG_PERSONA,
+            lp.NOMBRE_PERSONA,
+            COALESCE(lp.DNI_PERSONA, '-') AS DNI_PERSONA,
+            COALESCE(condo.DESCRIPCION, 'No asignada') AS NUM_CASA,
+            lp.FECHA_ELIMINACION,
+            COALESCE(lp.USUARIO_ELIMINACION, 'Sistema') AS USUARIO_ELIMINACION,
+            COALESCE(lp.ORIGEN_IP, 'Desconocida') AS ORIGEN_IP,
+            COALESCE(lp.NAVEGADOR, 'Navegador web') AS NAVEGADOR
+          FROM TBL_LOG_PERSONA lp
+          LEFT JOIN TBL_CONDOMINIOS condo ON lp.ID_CONDOMINIO = condo.ID_CONDOMINIO
+          ORDER BY lp.FECHA_ELIMINACION DESC
+          LIMIT 200;
+        `);
+        return res.status(200).json({ success: true, table, data: rows });
+      }
+
+      case 'logs_parametros': {
+        const [rows] = await connection.query(`
+          SELECT 
+            lp.ID_LOG_PARAMETRO,
+            lp.PARAMETRO,
+            lp.VALOR,
+            lp.FECHA_ELIMINACION,
+            COALESCE(lp.USUARIO_ELIMINACION, 'Sistema') AS USUARIO_ELIMINACION,
+            COALESCE(lp.ORIGEN_IP, 'Desconocida') AS ORIGEN_IP,
+            COALESCE(lp.NAVEGADOR, 'Navegador web') AS NAVEGADOR
+          FROM TBL_LOG_PARAMETROS lp
+          ORDER BY lp.FECHA_ELIMINACION DESC
+          LIMIT 200;
+        `);
+        return res.status(200).json({ success: true, table, data: rows });
+      }
+
+      case 'logs_roles': {
+        const [rows] = await connection.query(`
+          SELECT 
+            lr.ID_LOG_ROL,
+            lr.ROL,
+            COALESCE(lr.DESCRIPCION, '-') AS DESCRIPCION,
+            lr.FECHA_ELIMINACION,
+            COALESCE(lr.USUARIO_ELIMINACION, 'Sistema') AS USUARIO_ELIMINACION,
+            COALESCE(lr.ORIGEN_IP, 'Desconocida') AS ORIGEN_IP,
+            COALESCE(lr.NAVEGADOR, 'Navegador web') AS NAVEGADOR
+          FROM TBL_LOG_ROLES lr
+          ORDER BY lr.FECHA_ELIMINACION DESC
+          LIMIT 200;
+        `);
+        return res.status(200).json({ success: true, table, data: rows });
+      }
+
+      case 'logs_permisos': {
+        const [rows] = await connection.query(`
+          SELECT 
+            lp.ID_LOG_PERMISO,
+            COALESCE(r.ROL, 'Rol General') AS ROL,
+            lp.FECHA_ELIMINACION,
+            COALESCE(lp.USUARIO_ELIMINACION, 'Sistema') AS USUARIO_ELIMINACION,
+            COALESCE(lp.ORIGEN_IP, 'Desconocida') AS ORIGEN_IP,
+            COALESCE(lp.NAVEGADOR, 'Navegador web') AS NAVEGADOR
+          FROM TBL_LOG_PERMISOS lp
+          LEFT JOIN TBL_MS_ROLES r ON lp.ID_ROL = r.ID_ROL
+          ORDER BY lp.FECHA_ELIMINACION DESC
+          LIMIT 200;
+        `);
+        return res.status(200).json({ success: true, table, data: rows });
+      }
+
+      case 'logs_contrasenas': {
+        const [rows] = await connection.query(`
+          SELECT 
+            lh.ID_LOG_HIST,
+            COALESCE(u.NOMBRE_USUARIO, 'Usuario') AS NOMBRE_USUARIO,
+            lh.FECHA_ELIMINACION,
+            COALESCE(lh.USUARIO_ELIMINACION, 'Sistema') AS USUARIO_ELIMINACION,
+            COALESCE(lh.ORIGEN_IP, 'Desconocida') AS ORIGEN_IP,
+            COALESCE(lh.NAVEGADOR, 'Navegador web') AS NAVEGADOR
+          FROM \`TBL_LOG_HISTORIAL_CONTRASEÑA\` lh
+          LEFT JOIN TBL_MS_USUARIO u ON lh.ID_USUARIO = u.ID_USUARIO
+          ORDER BY lh.FECHA_ELIMINACION DESC
+          LIMIT 200;
+        `);
+        return res.status(200).json({ success: true, table, data: rows });
+      }
+
       default:
         return res.status(400).json({ success: false, message: `Tabla '${table}' no reconocida.` });
     }
@@ -552,7 +658,7 @@ const createMaintenanceRecord = async (req, res) => {
   const { table } = req.params;
   const data = req.body;
 
-  if (table === 'bitacoras' || table === 'bitacora_visitas' || table === 'escaneos_fallidos') {
+  if (table === 'bitacoras' || table === 'bitacora_visitas' || table === 'escaneos_fallidos' || table.startsWith('log')) {
     return res.status(403).json({
       success: false,
       message: 'Las bitácoras y registros de auditoría son de solo lectura y no pueden crearse manualmente.'
@@ -685,7 +791,7 @@ const updateMaintenanceRecord = async (req, res) => {
   const { table, id } = req.params;
   const updates = req.body;
 
-  if (table === 'bitacoras' || table === 'bitacora_visitas' || table === 'escaneos_fallidos') {
+  if (table === 'bitacoras' || table === 'bitacora_visitas' || table === 'escaneos_fallidos' || table.startsWith('log')) {
     return res.status(403).json({
       success: false,
       message: 'Las bitácoras y registros de auditoría son inmutables y no pueden modificarse.'
@@ -821,7 +927,7 @@ const updateMaintenanceRecord = async (req, res) => {
 const deleteMaintenanceRecord = async (req, res) => {
   const { table, id } = req.params;
 
-  if (table === 'bitacoras' || table === 'bitacora_visitas' || table === 'escaneos_fallidos') {
+  if (table === 'bitacoras' || table === 'bitacora_visitas' || table === 'escaneos_fallidos' || table.startsWith('log')) {
     return res.status(403).json({
       success: false,
       message: 'Las bitácoras y registros de auditoría son inmutables y no pueden eliminarse.'
