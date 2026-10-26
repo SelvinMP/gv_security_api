@@ -495,6 +495,44 @@ const getMaintenanceTable = async (req, res) => {
         return res.status(200).json({ success: true, table, data: rows });
       }
 
+      case 'bitacoras':
+      case 'bitacora_visitas': {
+        const [rows] = await connection.query(`
+          SELECT 
+            bv.ID_BITACORA_VISITA,
+            COALESCE(rv.NOMBRE_VISITANTE, vr.NOMBRE_VISITANTE, 'Visitante General') AS NOMBRE_VISITANTE,
+            COALESCE(rv.DNI_VISITANTE, vr.DNI_VISITANTE, '-') AS DNI_VISITANTE,
+            CASE 
+              WHEN bv.ID_VISITANTES_RECURRENTES IS NOT NULL THEN 'Recurrente'
+              ELSE 'Visita Única'
+            END AS TIPO_VISITA,
+            u_residente.NOMBRE_USUARIO AS NOMBRE_RESIDENTE,
+            condo.DESCRIPCION AS NUM_CASA,
+            COALESCE(u_guardia.NOMBRE_USUARIO, 'Guardia de Caseta') AS NOMBRE_GUARDIA,
+            bv.NUM_PERSONA,
+            COALESCE(NULLIF(bv.NUM_PLACA, ''), NULLIF(rv.NUM_PLACA, ''), NULLIF(vr.NUM_PLACA, ''), 'Peatonal') AS NUM_PLACA,
+            bv.FECHA_ACCESO,
+            bv.FECHA_HORA,
+            bv.FECHA_VENCIMIENTO,
+            bv.NOTA,
+            geo.NOMBRE_ZONA AS GEOCERCA_ZONA,
+            bv.LATITUD_ESCANEO,
+            bv.LONGITUD_ESCANEO,
+            bv.DISTANCIA_METROS,
+            bv.PRECISION_GPS
+          FROM TBL_BITACORA_VISITA bv
+          LEFT JOIN TBL_PERSONAS p ON bv.ID_PERSONA = p.ID_PERSONA
+          LEFT JOIN TBL_MS_USUARIO u_residente ON p.ID_USUARIO = u_residente.ID_USUARIO
+          LEFT JOIN TBL_CONDOMINIOS condo ON p.ID_CONDOMINIO = condo.ID_CONDOMINIO
+          LEFT JOIN TBL_REGVISITAS rv ON bv.ID_VISITANTE = rv.ID_VISITANTE
+          LEFT JOIN TBL_VISITANTES_RECURRENTES vr ON bv.ID_VISITANTES_RECURRENTES = vr.ID_VISITANTES_RECURRENTES
+          LEFT JOIN TBL_MS_USUARIO u_guardia ON bv.ID_USUARIO_GUARDIA = u_guardia.ID_USUARIO
+          LEFT JOIN TBL_GEOCERCAS geo ON bv.ID_GEOCERCA = geo.ID_GEOCERCA
+          ORDER BY COALESCE(bv.FECHA_ACCESO, bv.FECHA_HORA) DESC;
+        `);
+        return res.status(200).json({ success: true, table: 'bitacoras', data: rows });
+      }
+
       default:
         return res.status(400).json({ success: false, message: `Tabla '${table}' no reconocida.` });
     }
@@ -513,6 +551,14 @@ const getMaintenanceTable = async (req, res) => {
 const createMaintenanceRecord = async (req, res) => {
   const { table } = req.params;
   const data = req.body;
+
+  if (table === 'bitacoras' || table === 'bitacora_visitas' || table === 'escaneos_fallidos') {
+    return res.status(403).json({
+      success: false,
+      message: 'Las bitácoras y registros de auditoría son de solo lectura y no pueden crearse manualmente.'
+    });
+  }
+
   let connection;
 
   try {
@@ -638,6 +684,14 @@ const createMaintenanceRecord = async (req, res) => {
 const updateMaintenanceRecord = async (req, res) => {
   const { table, id } = req.params;
   const updates = req.body;
+
+  if (table === 'bitacoras' || table === 'bitacora_visitas' || table === 'escaneos_fallidos') {
+    return res.status(403).json({
+      success: false,
+      message: 'Las bitácoras y registros de auditoría son inmutables y no pueden modificarse.'
+    });
+  }
+
   let connection;
 
   try {
@@ -766,6 +820,14 @@ const updateMaintenanceRecord = async (req, res) => {
  */
 const deleteMaintenanceRecord = async (req, res) => {
   const { table, id } = req.params;
+
+  if (table === 'bitacoras' || table === 'bitacora_visitas' || table === 'escaneos_fallidos') {
+    return res.status(403).json({
+      success: false,
+      message: 'Las bitácoras y registros de auditoría son inmutables y no pueden eliminarse.'
+    });
+  }
+
   let connection;
 
   try {
