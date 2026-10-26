@@ -196,7 +196,7 @@ const verify2FA = async (req, res) => {
   let connection;
   try {
     connection = await mysqlPool.getConnection();
-    const [rows] = await connection.query("SELECT CODIGO_VERIFICACION, ID_ESTADO_USUARIO, INTENTOS_FALLIDOS, EMAIL FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?", [id_usuario]);
+    const [rows] = await connection.query("SELECT CODIGO_VERIFICACION, ID_ESTADO_USUARIO, INTENTOS_FALLIDOS, EMAIL, ID_ROL FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?", [id_usuario]);
     if (rows.length === 0) return res.status(401).json({ message: "Usuario no encontrado" });
 
     const user = rows[0];
@@ -224,14 +224,15 @@ const verify2FA = async (req, res) => {
     // Éxito: Resetear intentos y limpiar código
     await connection.query("UPDATE TBL_MS_USUARIO SET CODIGO_VERIFICACION = NULL, INTENTOS_FALLIDOS = 0, PRIMER_INGRESO_COMPLETADO = 1 WHERE ID_USUARIO = ?", [id_usuario]);
     
-    const token = jwt.sign({ id: id_usuario }, SECRET_KEY, { expiresIn: '2h' }); 
+    const token = jwt.sign({ id: id_usuario, role: user.ID_ROL }, SECRET_KEY, { expiresIn: '2h' }); 
     
     res.status(200).json({ 
       success: true, 
       token, 
       id_usuario: id_usuario,
+      role: user.ID_ROL,
       require2FA: false,
-      redirect: "/dashboard",
+      redirect: (user.ID_ROL === 1 || user.ID_ROL === 4) ? "/admin" : (user.ID_ROL === 3 ? "/scanner" : "/dashboard"),
       message: "Acceso concedido" 
     });
 

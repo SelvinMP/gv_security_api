@@ -12,6 +12,7 @@ const notificationRoutes = require('./routes/notificationRoutes');
 const reservationRoutes = require('./routes/reservationRoutes');
 const visitorRoutes = require('./routes/visitorRoutes');
 const guardiaRoutes = require('./routes/guardiaRoutes');
+const adminRoutes = require('./routes/adminRoutes');
 
 const app = express();
 
@@ -43,6 +44,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/reservas', reservationRoutes);
 app.use('/api/visitantes', visitorRoutes);
 app.use('/api/guardia', guardiaRoutes);
+app.use('/api/admin', adminRoutes);
 app.use('/api', notificationRoutes);
 console.log('Rutas registradas exitosamente');
 
