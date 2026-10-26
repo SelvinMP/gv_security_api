@@ -1,4 +1,5 @@
 const { mysqlPool } = require('../config/db');
+const bcrypt = require('bcrypt');
 
 /**
  * 1. Obtiene métricas y estadísticas consolidadas para el Dashboard Administrativo
@@ -33,15 +34,30 @@ const getDashboardStats = async (req, res) => {
       FROM TBL_RESERVAS;
     `);
 
-    // Reservaciones agrupadas por instalación
-    const [reservasPorInstalacion] = await connection.query(`
+    const totalReservas = reservaCounts[0]?.total_reservas || 0;
+
+    // Reservaciones agrupadas por instalación REAL de la Base de Datos
+    const [reservasPorInstalacionRaw] = await connection.query(`
       SELECT 
+        i.ID_INSTALACION,
         i.NOMBRE_INSTALACION,
+        i.CAPACIDAD,
+        i.PRECIO,
         COUNT(r.ID_RESERVA) AS total
       FROM TBL_INSTALACIONES i
       LEFT JOIN TBL_RESERVAS r ON i.ID_INSTALACION = r.ID_INSTALACION
-      GROUP BY i.ID_INSTALACION, i.NOMBRE_INSTALACION;
+      GROUP BY i.ID_INSTALACION, i.NOMBRE_INSTALACION, i.CAPACIDAD, i.PRECIO
+      ORDER BY total DESC;
     `);
+
+    const reservasPorInstalacion = reservasPorInstalacionRaw.map(item => ({
+      ID_INSTALACION: item.ID_INSTALACION,
+      NOMBRE_INSTALACION: item.NOMBRE_INSTALACION,
+      CAPACIDAD: item.CAPACIDAD,
+      PRECIO: item.PRECIO,
+      total: Number(item.total),
+      porcentaje: totalReservas > 0 ? Math.round((Number(item.total) / totalReservas) * 100) : 0
+    }));
 
     // Próximas 5 reservaciones
     const [proximasReservas] = await connection.query(`
@@ -72,7 +88,7 @@ const getDashboardStats = async (req, res) => {
         (SELECT COUNT(*) FROM TBL_VISITANTES_RECURRENTES) AS total_recurrentes_creados;
     `);
 
-    // Visitas de los últimos 7 días (para el gráfico de tendencias)
+    // Visitas de los últimos 7 días
     const [tendenciaVisitas] = await connection.query(`
       SELECT 
         DATE_FORMAT(d.dia, '%d/%m') AS fecha,
@@ -138,7 +154,6 @@ const getGeocercaConfig = async (req, res) => {
   try {
     connection = await mysqlPool.getConnection();
 
-    // Geocerca activa o principal
     const [geocercas] = await connection.query(`
       SELECT 
         g.ID_GEOCERCA,
@@ -156,7 +171,6 @@ const getGeocercaConfig = async (req, res) => {
       LIMIT 1;
     `);
 
-    // Parámetros de geocerca en TBL_MS_PARAMETROS
     const [params] = await connection.query(`
       SELECT PARAMETRO, VALOR 
       FROM TBL_MS_PARAMETROS 
@@ -168,11 +182,9 @@ const getGeocercaConfig = async (req, res) => {
       paramMap[p.PARAMETRO] = p.VALOR;
     });
 
-    // Últimos 10 escaneos fallidos para auditoría
     const [failedScans] = await connection.query(`
       SELECT 
         l.ID_LOG_ESCANEO,
-        l.ID_USUARIO_GUARDIA,
         u.NOMBRE_USUARIO AS NOMBRE_GUARDIA,
         l.LATITUD_INTENTO,
         l.LONGITUD_INTENTO,
@@ -180,6 +192,7 @@ const getGeocercaConfig = async (req, res) => {
         l.PRECISION_GPS,
         l.MOTIVO_RECHAZO,
         l.DISPOSITIVO,
+        l.ORIGEN_IP,
         l.FECHA_HORA
       FROM TBL_LOG_ESCANEO_FALLIDO l
       LEFT JOIN TBL_MS_USUARIO u ON l.ID_USUARIO_GUARDIA = u.ID_USUARIO
@@ -212,7 +225,6 @@ const getGeocercaConfig = async (req, res) => {
  * ¡REGLA ESTRICTA!: Solo Super Administrador (ID_ROL = 1)
  */
 const updateGeocercaConfig = async (req, res) => {
-  // Validación estricta de rol
   if (!req.user || Number(req.user.role) !== 1) {
     return res.status(403).json({
       success: false,
@@ -249,7 +261,6 @@ const updateGeocercaConfig = async (req, res) => {
     const activoVal = activo !== undefined ? (activo ? 1 : 0) : 1;
     const precisionVal = precision_maxima ? parseInt(precision_maxima, 10) : 40;
 
-    // Actualizar o insertar geocerca en TBL_GEOCERCAS
     if (id_geocerca) {
       await connection.query(`
         UPDATE TBL_GEOCERCAS SET
@@ -262,7 +273,6 @@ const updateGeocercaConfig = async (req, res) => {
         WHERE ID_GEOCERCA = ?;
       `, [nombre_zona || null, descripcion || null, latNum, lngNum, radioNum, activoVal, id_geocerca]);
     } else {
-      // Si no existe, verificar si hay alguna o insertar
       const [existing] = await connection.query('SELECT ID_GEOCERCA FROM TBL_GEOCERCAS LIMIT 1');
       if (existing.length > 0) {
         await connection.query(`
@@ -291,7 +301,6 @@ const updateGeocercaConfig = async (req, res) => {
       }
     }
 
-    // Actualizar parámetros globales en TBL_MS_PARAMETROS
     // GEOCERCA_ACTIVA
     const [pActiva] = await connection.query("SELECT ID_PARAMETRO FROM TBL_MS_PARAMETROS WHERE PARAMETRO = 'GEOCERCA_ACTIVA'");
     if (pActiva.length > 0) {
@@ -325,7 +334,43 @@ const updateGeocercaConfig = async (req, res) => {
 };
 
 /**
- * 4. Obtiene los registros de las Tablas de Mantenimiento del Sistema
+ * 4. Obtiene opciones de formulario (Roles, Estados, Instalaciones, Condominios) para selects de los modales CRUD
+ */
+const getFormOptions = async (req, res) => {
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+
+    const [roles] = await connection.query('SELECT ID_ROL, ROL, DESCRIPCION FROM TBL_MS_ROLES ORDER BY ID_ROL ASC');
+    const [estadosUsuario] = await connection.query('SELECT ID_ESTADO_USUARIO, DESCRIPCION FROM TBL_ESTADO_USUARIO ORDER BY ID_ESTADO_USUARIO ASC');
+    const [estadosReserva] = await connection.query('SELECT ID_ESTADO_RESERVA, DESCRIPCION FROM TBL_ESTADO_RESERVA ORDER BY ID_ESTADO_RESERVA ASC');
+    const [tiposCondominio] = await connection.query('SELECT ID_TIPO_CONDOMINIO, DESCRIPCION FROM TBL_TIPO_CONDOMINIO ORDER BY ID_TIPO_CONDOMINIO ASC');
+    const [instalaciones] = await connection.query('SELECT ID_INSTALACION, NOMBRE_INSTALACION, CAPACIDAD, PRECIO FROM TBL_INSTALACIONES ORDER BY ID_INSTALACION ASC');
+    const [condominios] = await connection.query('SELECT ID_CONDOMINIO, DESCRIPCION FROM TBL_CONDOMINIOS ORDER BY CAST(DESCRIPCION AS UNSIGNED) ASC, ID_CONDOMINIO ASC');
+    const [usuarios] = await connection.query('SELECT ID_USUARIO, NOMBRE_USUARIO, EMAIL FROM TBL_MS_USUARIO WHERE ID_ESTADO_USUARIO = 1 ORDER BY NOMBRE_USUARIO ASC');
+
+    res.status(200).json({
+      success: true,
+      data: {
+        roles,
+        estadosUsuario,
+        estadosReserva,
+        tiposCondominio,
+        instalaciones,
+        condominios,
+        usuarios
+      }
+    });
+  } catch (error) {
+    console.error('Error al obtener opciones para formularios:', error);
+    res.status(500).json({ success: false, message: 'Error al consultar listas maestras.' });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+/**
+ * 5. Obtiene los registros de las Tablas de Mantenimiento con campos limpios y sin exponer ID al usuario
  */
 const getMaintenanceTable = async (req, res) => {
   const { table } = req.params;
@@ -345,8 +390,8 @@ const getMaintenanceTable = async (req, res) => {
             r.ROL,
             u.ID_ESTADO_USUARIO,
             eu.DESCRIPCION AS ESTADO_USUARIO,
-            u.PRIMER_INGRESO_COMPLETADO,
             p.DNI_PERSONA,
+            p.ID_CONDOMINIO,
             c.DESCRIPCION AS NUM_CASA
           FROM TBL_MS_USUARIO u
           LEFT JOIN TBL_MS_ROLES r ON u.ID_ROL = r.ID_ROL
@@ -388,8 +433,9 @@ const getMaintenanceTable = async (req, res) => {
           SELECT 
             c.ID_CONDOMINIO,
             c.DESCRIPCION AS NUM_CASA,
-            c.USUARIOS_POR_CASA,
+            c.ID_TIPO_CONDOMINIO,
             tc.DESCRIPCION AS TIPO_CONDOMINIO,
+            c.USUARIOS_POR_CASA,
             (SELECT COUNT(*) FROM TBL_PERSONAS p WHERE p.ID_CONDOMINIO = c.ID_CONDOMINIO) AS RESIDENTES_ACTUALES
           FROM TBL_CONDOMINIOS c
           LEFT JOIN TBL_TIPO_CONDOMINIO tc ON c.ID_TIPO_CONDOMINIO = tc.ID_TIPO_CONDOMINIO
@@ -428,30 +474,10 @@ const getMaintenanceTable = async (req, res) => {
         return res.status(200).json({ success: true, table, data: rows });
       }
 
-      case 'geocercas': {
-        const [rows] = await connection.query(`
-          SELECT 
-            g.ID_GEOCERCA,
-            g.NOMBRE_ZONA,
-            g.DESCRIPCION,
-            g.LATITUD_CENTRO,
-            g.LONGITUD_CENTRO,
-            g.RADIO_METROS,
-            g.ACTIVO,
-            g.FECHA_CREACION,
-            u.NOMBRE_USUARIO AS CREADO_POR
-          FROM TBL_GEOCERCAS g
-          LEFT JOIN TBL_MS_USUARIO u ON g.CREADO_POR = u.ID_USUARIO
-          ORDER BY g.ID_GEOCERCA ASC;
-        `);
-        return res.status(200).json({ success: true, table, data: rows });
-      }
-
       case 'escaneos_fallidos': {
         const [rows] = await connection.query(`
           SELECT 
             l.ID_LOG_ESCANEO,
-            l.ID_USUARIO_GUARDIA,
             u.NOMBRE_USUARIO AS NOMBRE_GUARDIA,
             l.LATITUD_INTENTO,
             l.LONGITUD_INTENTO,
@@ -482,7 +508,132 @@ const getMaintenanceTable = async (req, res) => {
 };
 
 /**
- * 5. Actualiza un registro de una tabla de mantenimiento
+ * 6. CREAR (INSERT) registro nuevo en tabla de mantenimiento
+ */
+const createMaintenanceRecord = async (req, res) => {
+  const { table } = req.params;
+  const data = req.body;
+  let connection;
+
+  try {
+    connection = await mysqlPool.getConnection();
+    await connection.beginTransaction();
+
+    switch (table) {
+      case 'usuarios': {
+        const { NOMBRE_USUARIO, EMAIL, CONTRASEÑA, ID_ROL, ID_ESTADO_USUARIO, DNI_PERSONA, ID_CONDOMINIO } = data;
+        if (!NOMBRE_USUARIO || !EMAIL || !CONTRASEÑA) {
+          return res.status(400).json({ success: false, message: 'Nombre, email y contraseña son obligatorios.' });
+        }
+
+        const [exists] = await connection.query('SELECT ID_USUARIO FROM TBL_MS_USUARIO WHERE EMAIL = ?', [EMAIL]);
+        if (exists.length > 0) {
+          return res.status(400).json({ success: false, message: 'El correo electrónico ya está registrado.' });
+        }
+
+        const hashedPassword = await bcrypt.hash(CONTRASEÑA, 8);
+        const [userResult] = await connection.query(`
+          INSERT INTO TBL_MS_USUARIO (NOMBRE_USUARIO, EMAIL, CONTRASEÑA, ID_ROL, ID_ESTADO_USUARIO, PRIMER_INGRESO_COMPLETADO, PRIMER_INGRESO)
+          VALUES (?, ?, ?, ?, ?, 1, NOW());
+        `, [NOMBRE_USUARIO, EMAIL, hashedPassword, ID_ROL || 2, ID_ESTADO_USUARIO || 1]);
+
+        const newUserId = userResult.insertId;
+
+        // Crear registro en TBL_PERSONAS
+        await connection.query(`
+          INSERT INTO TBL_PERSONAS (ID_USUARIO, DNI_PERSONA, ID_CONDOMINIO, ID_ESTADO_PERSONA)
+          VALUES (?, ?, ?, ?);
+        `, [newUserId, DNI_PERSONA || null, ID_CONDOMINIO || null, ID_ESTADO_USUARIO || 1]);
+
+        break;
+      }
+
+      case 'instalaciones': {
+        const { NOMBRE_INSTALACION, CAPACIDAD, PRECIO, DESCRIPCION } = data;
+        if (!NOMBRE_INSTALACION) {
+          return res.status(400).json({ success: false, message: 'El nombre de la instalación es obligatorio.' });
+        }
+        await connection.query(`
+          INSERT INTO TBL_INSTALACIONES (NOMBRE_INSTALACION, CAPACIDAD, PRECIO, DESCRIPCION)
+          VALUES (?, ?, ?, ?);
+        `, [
+          NOMBRE_INSTALACION.toUpperCase().trim(),
+          Number(CAPACIDAD) || 30,
+          parseFloat(PRECIO) || 0,
+          DESCRIPCION || 'EN BASE A LA ADMINISTRACION'
+        ]);
+        break;
+      }
+
+      case 'condominios': {
+        const { NUM_CASA, ID_TIPO_CONDOMINIO, USUARIOS_POR_CASA } = data;
+        if (!NUM_CASA) {
+          return res.status(400).json({ success: false, message: 'El número o identificador de casa es obligatorio.' });
+        }
+        await connection.query(`
+          INSERT INTO TBL_CONDOMINIOS (DESCRIPCION, ID_TIPO_CONDOMINIO, USUARIOS_POR_CASA)
+          VALUES (?, ?, ?);
+        `, [
+          String(NUM_CASA).trim(),
+          Number(ID_TIPO_CONDOMINIO) || 1,
+          Number(USUARIOS_POR_CASA) || 4
+        ]);
+        break;
+      }
+
+      case 'reservaciones': {
+        const { ID_USUARIO, ID_INSTALACION, FECHA_RESERVA, HORA_INICIO, HORA_FINAL, TIPO_EVENTO, NUM_INVITADO, NOTAS, ID_ESTADO_RESERVA } = data;
+        if (!ID_USUARIO || !ID_INSTALACION || !FECHA_RESERVA || !HORA_INICIO || !HORA_FINAL) {
+          return res.status(400).json({ success: false, message: 'Usuario, instalación, fecha y horarios son requeridos.' });
+        }
+        await connection.query(`
+          INSERT INTO TBL_RESERVAS (ID_USUARIO, ID_INSTALACION, ID_ESTADO_RESERVA, TIPO_EVENTO, NUM_INVITADO, NOTAS, FECHA_RESERVA, HORA_INICIO, HORA_FINAL)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+        `, [
+          ID_USUARIO,
+          ID_INSTALACION,
+          ID_ESTADO_RESERVA || 1,
+          TIPO_EVENTO || 'EVENTO SOCIAL',
+          Number(NUM_INVITADO) || 10,
+          NOTAS || '',
+          FECHA_RESERVA,
+          HORA_INICIO,
+          HORA_FINAL
+        ]);
+        break;
+      }
+
+      case 'parametros': {
+        const { PARAMETRO, VALOR } = data;
+        if (!PARAMETRO || VALOR === undefined) {
+          return res.status(400).json({ success: false, message: 'Nombre del parámetro y valor son obligatorios.' });
+        }
+        await connection.query(`
+          INSERT INTO TBL_MS_PARAMETROS (ID_USUARIO, PARAMETRO, VALOR, FECHA_CREACION)
+          VALUES (?, ?, ?, NOW());
+        `, [req.user.id, PARAMETRO.toUpperCase().trim(), String(VALOR)]);
+        break;
+      }
+
+      default:
+        await connection.rollback();
+        return res.status(400).json({ success: false, message: `Creación no soportada para tabla ${table}.` });
+    }
+
+    await connection.commit();
+    res.status(201).json({ success: true, message: `Nuevo registro creado con éxito en ${table}.` });
+
+  } catch (error) {
+    if (connection) await connection.rollback();
+    console.error(`Error al crear en ${table}:`, error);
+    res.status(500).json({ success: false, message: error.message || 'Error interno al crear registro.' });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+/**
+ * 7. MODIFICAR (UPDATE) registro existente en tabla de mantenimiento
  */
 const updateMaintenanceRecord = async (req, res) => {
   const { table, id } = req.params;
@@ -491,33 +642,68 @@ const updateMaintenanceRecord = async (req, res) => {
 
   try {
     connection = await mysqlPool.getConnection();
+    await connection.beginTransaction();
 
     switch (table) {
       case 'usuarios': {
-        const { ID_ESTADO_USUARIO, ID_ROL } = updates;
-        if (ID_ESTADO_USUARIO === undefined && ID_ROL === undefined) {
-          return res.status(400).json({ success: false, message: 'No hay campos para actualizar.' });
+        const { NOMBRE_USUARIO, EMAIL, CONTRASEÑA, ID_ROL, ID_ESTADO_USUARIO, DNI_PERSONA, ID_CONDOMINIO } = updates;
+
+        let passwordQuery = '';
+        const params = [NOMBRE_USUARIO, EMAIL, ID_ROL, ID_ESTADO_USUARIO];
+
+        if (CONTRASEÑA && CONTRASEÑA.trim() !== '') {
+          const hashedPassword = await bcrypt.hash(CONTRASEÑA, 8);
+          passwordQuery = ', CONTRASEÑA = ?';
+          params.push(hashedPassword);
         }
+
+        params.push(id);
+
         await connection.query(`
           UPDATE TBL_MS_USUARIO SET
-            ID_ESTADO_USUARIO = COALESCE(?, ID_ESTADO_USUARIO),
-            ID_ROL = COALESCE(?, ID_ROL)
+            NOMBRE_USUARIO = COALESCE(?, NOMBRE_USUARIO),
+            EMAIL = COALESCE(?, EMAIL),
+            ID_ROL = COALESCE(?, ID_ROL),
+            ID_ESTADO_USUARIO = COALESCE(?, ID_ESTADO_USUARIO)
+            ${passwordQuery}
           WHERE ID_USUARIO = ?;
-        `, [ID_ESTADO_USUARIO, ID_ROL, id]);
+        `, params);
+
+        // Actualizar datos de persona
+        if (DNI_PERSONA !== undefined || ID_CONDOMINIO !== undefined) {
+          const [persona] = await connection.query('SELECT ID_PERSONA FROM TBL_PERSONAS WHERE ID_USUARIO = ?', [id]);
+          if (persona.length > 0) {
+            await connection.query(`
+              UPDATE TBL_PERSONAS SET
+                DNI_PERSONA = COALESCE(?, DNI_PERSONA),
+                ID_CONDOMINIO = COALESCE(?, ID_CONDOMINIO),
+                ID_ESTADO_PERSONA = COALESCE(?, ID_ESTADO_PERSONA)
+              WHERE ID_USUARIO = ?;
+            `, [DNI_PERSONA, ID_CONDOMINIO, ID_ESTADO_USUARIO, id]);
+          } else {
+            await connection.query(`
+              INSERT INTO TBL_PERSONAS (ID_USUARIO, DNI_PERSONA, ID_CONDOMINIO, ID_ESTADO_PERSONA)
+              VALUES (?, ?, ?, ?);
+            `, [id, DNI_PERSONA || null, ID_CONDOMINIO || null, ID_ESTADO_USUARIO || 1]);
+          }
+        }
         break;
       }
 
       case 'reservaciones': {
-        const { ID_ESTADO_RESERVA, NOTAS } = updates;
-        if (ID_ESTADO_RESERVA === undefined) {
-          return res.status(400).json({ success: false, message: 'Estado de reserva requerido.' });
-        }
+        const { ID_ESTADO_RESERVA, ID_INSTALACION, FECHA_RESERVA, HORA_INICIO, HORA_FINAL, TIPO_EVENTO, NUM_INVITADO, NOTAS } = updates;
         await connection.query(`
           UPDATE TBL_RESERVAS SET
-            ID_ESTADO_RESERVA = ?,
+            ID_ESTADO_RESERVA = COALESCE(?, ID_ESTADO_RESERVA),
+            ID_INSTALACION = COALESCE(?, ID_INSTALACION),
+            FECHA_RESERVA = COALESCE(?, FECHA_RESERVA),
+            HORA_INICIO = COALESCE(?, HORA_INICIO),
+            HORA_FINAL = COALESCE(?, HORA_FINAL),
+            TIPO_EVENTO = COALESCE(?, TIPO_EVENTO),
+            NUM_INVITADO = COALESCE(?, NUM_INVITADO),
             NOTAS = COALESCE(?, NOTAS)
           WHERE ID_RESERVA = ?;
-        `, [ID_ESTADO_RESERVA, NOTAS, id]);
+        `, [ID_ESTADO_RESERVA, ID_INSTALACION, FECHA_RESERVA, HORA_INICIO, HORA_FINAL, TIPO_EVENTO, NUM_INVITADO, NOTAS, id]);
         break;
       }
 
@@ -534,29 +720,94 @@ const updateMaintenanceRecord = async (req, res) => {
         break;
       }
 
+      case 'condominios': {
+        const { NUM_CASA, ID_TIPO_CONDOMINIO, USUARIOS_POR_CASA } = updates;
+        await connection.query(`
+          UPDATE TBL_CONDOMINIOS SET
+            DESCRIPCION = COALESCE(?, DESCRIPCION),
+            ID_TIPO_CONDOMINIO = COALESCE(?, ID_TIPO_CONDOMINIO),
+            USUARIOS_POR_CASA = COALESCE(?, USUARIOS_POR_CASA)
+          WHERE ID_CONDOMINIO = ?;
+        `, [NUM_CASA, ID_TIPO_CONDOMINIO, USUARIOS_POR_CASA, id]);
+        break;
+      }
+
       case 'parametros': {
-        const { VALOR } = updates;
-        if (VALOR === undefined) {
-          return res.status(400).json({ success: false, message: 'Valor requerido.' });
-        }
+        const { PARAMETRO, VALOR } = updates;
         await connection.query(`
           UPDATE TBL_MS_PARAMETROS SET
-            VALOR = ?,
+            PARAMETRO = COALESCE(?, PARAMETRO),
+            VALOR = COALESCE(?, VALOR),
             FECHA_MODIFICACION = NOW()
           WHERE ID_PARAMETRO = ?;
-        `, [VALOR, id]);
+        `, [PARAMETRO, VALOR, id]);
         break;
       }
 
       default:
-        return res.status(400).json({ success: false, message: `Operación no soportada para ${table}.` });
+        await connection.rollback();
+        return res.status(400).json({ success: false, message: `Modificación no soportada para ${table}.` });
     }
 
-    res.status(200).json({ success: true, message: `Registro ${id} actualizado correctamente en ${table}.` });
+    await connection.commit();
+    res.status(200).json({ success: true, message: `Registro actualizado correctamente en ${table}.` });
 
   } catch (error) {
+    if (connection) await connection.rollback();
     console.error(`Error al actualizar tabla ${table}:`, error);
     res.status(500).json({ success: false, message: 'Error interno al actualizar registro.' });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+/**
+ * 8. ELIMINAR (DELETE) registro en tabla de mantenimiento
+ */
+const deleteMaintenanceRecord = async (req, res) => {
+  const { table, id } = req.params;
+  let connection;
+
+  try {
+    connection = await mysqlPool.getConnection();
+
+    switch (table) {
+      case 'usuarios': {
+        // En usuarios hacemos desactivación de estado para no romper integridad de bitácora
+        await connection.query('UPDATE TBL_MS_USUARIO SET ID_ESTADO_USUARIO = 2 WHERE ID_USUARIO = ?', [id]);
+        break;
+      }
+
+      case 'instalaciones': {
+        await connection.query('DELETE FROM TBL_INSTALACIONES WHERE ID_INSTALACION = ?', [id]);
+        break;
+      }
+
+      case 'condominios': {
+        await connection.query('DELETE FROM TBL_CONDOMINIOS WHERE ID_CONDOMINIO = ?', [id]);
+        break;
+      }
+
+      case 'reservaciones': {
+        // Cambiar estado a Cancelada (2)
+        await connection.query('UPDATE TBL_RESERVAS SET ID_ESTADO_RESERVA = 2 WHERE ID_RESERVA = ?', [id]);
+        break;
+      }
+
+      case 'parametros': {
+        await connection.query('DELETE FROM TBL_MS_PARAMETROS WHERE ID_PARAMETRO = ?', [id]);
+        break;
+      }
+
+      default:
+        return res.status(400).json({ success: false, message: `Eliminación no permitida para ${table}.` });
+    }
+
+    res.status(200).json({ success: true, message: `Registro eliminado/desactivado con éxito en ${table}.` });
+
+  } catch (error) {
+    console.error(`Error al eliminar en ${table}:`, error);
+    res.status(500).json({ success: false, message: error.message || 'Error interno al procesar eliminación.' });
   } finally {
     if (connection) connection.release();
   }
@@ -566,6 +817,9 @@ module.exports = {
   getDashboardStats,
   getGeocercaConfig,
   updateGeocercaConfig,
+  getFormOptions,
   getMaintenanceTable,
-  updateMaintenanceRecord
+  createMaintenanceRecord,
+  updateMaintenanceRecord,
+  deleteMaintenanceRecord
 };
