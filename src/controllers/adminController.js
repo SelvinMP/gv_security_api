@@ -79,19 +79,78 @@ const getDashboardStats = async (req, res) => {
       LIMIT 5;
     `);
 
+    // ── Detalle Dinámico de Estados de Usuario ──
+    const [estadosDetalle] = await connection.query(`
+      SELECT 
+        eu.ID_ESTADO_USUARIO,
+        eu.DESCRIPCION AS ESTADO,
+        COUNT(u.ID_USUARIO) AS total,
+        COALESCE(ROUND((COUNT(u.ID_USUARIO) / NULLIF((SELECT COUNT(*) FROM TBL_MS_USUARIO), 0)) * 100, 1), 0) AS porcentaje
+      FROM TBL_ESTADO_USUARIO eu
+      LEFT JOIN TBL_MS_USUARIO u ON eu.ID_ESTADO_USUARIO = u.ID_ESTADO_USUARIO
+      GROUP BY eu.ID_ESTADO_USUARIO, eu.DESCRIPCION
+      ORDER BY eu.ID_ESTADO_USUARIO ASC;
+    `);
+
+    // ── Detalle Dinámico de Roles de Usuario ──
+    const [rolesDetalle] = await connection.query(`
+      SELECT 
+        r.ID_ROL,
+        r.ROL,
+        r.DESCRIPCION,
+        COUNT(u.ID_USUARIO) AS total,
+        COALESCE(ROUND((COUNT(u.ID_USUARIO) / NULLIF((SELECT COUNT(*) FROM TBL_MS_USUARIO), 0)) * 100, 1), 0) AS porcentaje
+      FROM TBL_MS_ROLES r
+      LEFT JOIN TBL_MS_USUARIO u ON r.ID_ROL = u.ID_ROL
+      GROUP BY r.ID_ROL, r.ROL, r.DESCRIPCION
+      ORDER BY r.ID_ROL ASC;
+    `);
+
     // ── Estadísticas de Accesos / Visitas ──
     const [visitaCounts] = await connection.query(`
       SELECT 
         (SELECT COUNT(*) FROM TBL_BITACORA_VISITA) AS total_accesos_bitacora,
-        (SELECT COUNT(*) FROM TBL_BITACORA_VISITA WHERE DATE(FECHA_ACCESO) = CURDATE()) AS accesos_hoy,
+        (SELECT COUNT(*) FROM TBL_BITACORA_VISITA WHERE DATE(COALESCE(FECHA_ACCESO, FECHA_HORA)) = CURDATE()) AS accesos_hoy,
         (SELECT COUNT(*) FROM TBL_REGVISITAS) AS total_visitas_generadas,
         (SELECT COUNT(*) FROM TBL_VISITANTES_RECURRENTES) AS total_recurrentes_creados;
     `);
 
-    // Visitas de los últimos 7 días
-    const [tendenciaVisitas] = await connection.query(`
+    // ── Tendencia Día (Últimas 24 horas por bloques de 2 horas) ──
+    const [visitasDiaRaw] = await connection.query(`
+      SELECT 
+        HOUR(COALESCE(FECHA_ACCESO, FECHA_HORA)) AS hora,
+        COUNT(*) AS total_accesos
+      FROM TBL_BITACORA_VISITA
+      WHERE DATE(COALESCE(FECHA_ACCESO, FECHA_HORA)) = CURDATE()
+         OR DATE(COALESCE(FECHA_ACCESO, FECHA_HORA)) = (SELECT DATE(MAX(COALESCE(FECHA_ACCESO, FECHA_HORA))) FROM TBL_BITACORA_VISITA)
+      GROUP BY HOUR(COALESCE(FECHA_ACCESO, FECHA_HORA))
+      ORDER BY hora ASC;
+    `);
+
+    const horasMap = {};
+    visitasDiaRaw.forEach(r => { horasMap[r.hora] = Number(r.total_accesos); });
+    const tendenciaDia = [];
+    for (let h = 0; h < 24; h += 2) {
+      const sum = (horasMap[h] || 0) + (horasMap[h + 1] || 0);
+      tendenciaDia.push({
+        label: `${String(h).padStart(2, '0')}:00`,
+        total_accesos: sum
+      });
+    }
+
+    // ── Tendencia Semana (Últimos 7 días con nombres de días) ──
+    const [tendenciaSemana] = await connection.query(`
       SELECT 
         DATE_FORMAT(d.dia, '%d/%m') AS fecha,
+        CASE DAYOFWEEK(d.dia)
+          WHEN 1 THEN 'Dom'
+          WHEN 2 THEN 'Lun'
+          WHEN 3 THEN 'Mar'
+          WHEN 4 THEN 'Mié'
+          WHEN 5 THEN 'Jue'
+          WHEN 6 THEN 'Vie'
+          WHEN 7 THEN 'Sáb'
+        END AS dia_semana,
         COALESCE(COUNT(bv.ID_BITACORA_VISITA), 0) AS total_accesos
       FROM (
         SELECT CURDATE() - INTERVAL 6 DAY AS dia UNION ALL
@@ -102,15 +161,102 @@ const getDashboardStats = async (req, res) => {
         SELECT CURDATE() - INTERVAL 1 DAY UNION ALL
         SELECT CURDATE()
       ) d
-      LEFT JOIN TBL_BITACORA_VISITA bv ON DATE(bv.FECHA_ACCESO) = d.dia
+      LEFT JOIN TBL_BITACORA_VISITA bv ON DATE(COALESCE(bv.FECHA_ACCESO, bv.FECHA_HORA)) = d.dia
       GROUP BY d.dia
       ORDER BY d.dia ASC;
     `);
 
-    // ── Estadísticas de Condominios ──
-    const [condoCounts] = await connection.query(`
-      SELECT COUNT(*) AS total_condominios FROM TBL_CONDOMINIOS;
+    // ── Tendencia Mes (Últimos 30 días día a día) ──
+    const [visitasMesRaw] = await connection.query(`
+      SELECT 
+        DATE_FORMAT(COALESCE(FECHA_ACCESO, FECHA_HORA), '%d/%m') AS fecha,
+        COUNT(*) AS total_accesos
+      FROM TBL_BITACORA_VISITA
+      WHERE COALESCE(FECHA_ACCESO, FECHA_HORA) >= CURDATE() - INTERVAL 30 DAY
+      GROUP BY DATE_FORMAT(COALESCE(FECHA_ACCESO, FECHA_HORA), '%d/%m');
     `);
+
+    const mesMap = {};
+    visitasMesRaw.forEach(r => { mesMap[r.fecha] = Number(r.total_accesos); });
+
+    const [dias30] = await connection.query(`
+      SELECT DATE_FORMAT(CURDATE() - INTERVAL n DAY, '%d/%m') AS fecha
+      FROM (
+        SELECT 29 AS n UNION ALL SELECT 28 UNION ALL SELECT 27 UNION ALL SELECT 26 UNION ALL SELECT 25 UNION ALL
+        SELECT 24 UNION ALL SELECT 23 UNION ALL SELECT 22 UNION ALL SELECT 21 UNION ALL SELECT 20 UNION ALL
+        SELECT 19 UNION ALL SELECT 18 UNION ALL SELECT 17 UNION ALL SELECT 16 UNION ALL SELECT 15 UNION ALL
+        SELECT 14 UNION ALL SELECT 13 UNION ALL SELECT 12 UNION ALL SELECT 11 UNION ALL SELECT 10 UNION ALL
+        SELECT 9 UNION ALL SELECT 8 UNION ALL SELECT 7 UNION ALL SELECT 6 UNION ALL SELECT 5 UNION ALL
+        SELECT 4 UNION ALL SELECT 3 UNION ALL SELECT 2 UNION ALL SELECT 1 UNION ALL SELECT 0
+      ) seq
+      ORDER BY n DESC;
+    `);
+
+    const tendenciaMes = dias30.map(d => ({
+      fecha: d.fecha,
+      label: d.fecha,
+      total_accesos: mesMap[d.fecha] || 0
+    }));
+
+    // ── Tendencia Año (Últimos 12 meses) ──
+    const [visitasAñoRaw] = await connection.query(`
+      SELECT 
+        DATE_FORMAT(COALESCE(FECHA_ACCESO, FECHA_HORA), '%Y-%m') AS mes_key,
+        COUNT(*) AS total_accesos
+      FROM TBL_BITACORA_VISITA
+      WHERE COALESCE(FECHA_ACCESO, FECHA_HORA) >= CURDATE() - INTERVAL 12 MONTH
+      GROUP BY mes_key;
+    `);
+
+    const anoMap = {};
+    visitasAñoRaw.forEach(r => { anoMap[r.mes_key] = Number(r.total_accesos); });
+
+    const [meses12] = await connection.query(`
+      SELECT 
+        DATE_FORMAT(CURDATE() - INTERVAL n MONTH, '%Y-%m') AS mes_key,
+        CASE DATE_FORMAT(CURDATE() - INTERVAL n MONTH, '%m')
+          WHEN '01' THEN 'Ene'
+          WHEN '02' THEN 'Feb'
+          WHEN '03' THEN 'Mar'
+          WHEN '04' THEN 'Abr'
+          WHEN '05' THEN 'May'
+          WHEN '06' THEN 'Jun'
+          WHEN '07' THEN 'Jul'
+          WHEN '08' THEN 'Ago'
+          WHEN '09' THEN 'Sep'
+          WHEN '10' THEN 'Oct'
+          WHEN '11' THEN 'Nov'
+          WHEN '12' THEN 'Dic'
+        END AS mes_nombre
+      FROM (
+        SELECT 11 AS n UNION ALL SELECT 10 UNION ALL SELECT 9 UNION ALL SELECT 8 UNION ALL
+        SELECT 7 UNION ALL SELECT 6 UNION ALL SELECT 5 UNION ALL SELECT 4 UNION ALL
+        SELECT 3 UNION ALL SELECT 2 UNION ALL SELECT 1 UNION ALL SELECT 0
+      ) seq
+      ORDER BY n DESC;
+    `);
+
+    const tendenciaAño = meses12.map(m => ({
+      mes_key: m.mes_key,
+      label: m.mes_nombre,
+      total_accesos: anoMap[m.mes_key] || 0
+    }));
+
+    // ── Estadísticas de Condominios y Capacidad Total ──
+    const [condoMetrics] = await connection.query(`
+      SELECT 
+        COUNT(*) AS total_condominios,
+        COALESCE(SUM(USUARIOS_POR_CASA), 0) AS total_capacidad_usuarios,
+        (SELECT COUNT(DISTINCT ID_CONDOMINIO) FROM TBL_PERSONAS WHERE ID_CONDOMINIO IS NOT NULL) AS condominios_ocupados,
+        (SELECT COUNT(*) FROM TBL_PERSONAS WHERE ID_CONDOMINIO IS NOT NULL) AS residentes_asignados
+      FROM TBL_CONDOMINIOS;
+    `);
+
+    const totalCondominios = Number(condoMetrics[0]?.total_condominios || 0);
+    const condominiosOcupados = Number(condoMetrics[0]?.condominios_ocupados || 0);
+    const totalCapacidadUsuarios = Number(condoMetrics[0]?.total_capacidad_usuarios || 0);
+    const residentesAsignados = Number(condoMetrics[0]?.residentes_asignados || 0);
+    const tasaOcupacion = totalCondominios > 0 ? Math.round((condominiosOcupados / totalCondominios) * 100) : 0;
 
     // ── Estadísticas de Geocerca y Auditoría ──
     const [geocercaStats] = await connection.query(`
@@ -123,7 +269,11 @@ const getDashboardStats = async (req, res) => {
     res.status(200).json({
       success: true,
       data: {
-        usuarios: userCounts[0],
+        usuarios: {
+          ...userCounts[0],
+          estados: estadosDetalle,
+          roles: rolesDetalle
+        },
         reservas: {
           ...reservaCounts[0],
           porInstalacion: reservasPorInstalacion,
@@ -131,9 +281,19 @@ const getDashboardStats = async (req, res) => {
         },
         visitas: {
           ...visitaCounts[0],
-          tendenciaSemanal: tendenciaVisitas
+          tendenciaSemanal: tendenciaSemana,
+          tendenciaDia,
+          tendenciaSemana,
+          tendenciaMes,
+          tendenciaAño
         },
-        condominios: condoCounts[0],
+        condominios: {
+          total_condominios: totalCondominios,
+          total_capacidad_usuarios: totalCapacidadUsuarios,
+          condominios_ocupados: condominiosOcupados,
+          residentes_asignados: residentesAsignados,
+          tasa_ocupacion: tasaOcupacion
+        },
         geocerca: geocercaStats[0]
       }
     });
