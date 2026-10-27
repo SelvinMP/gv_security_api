@@ -1,0 +1,112 @@
+================================================================================
+          GV-SECURITY - GUÍA TÉCNICA PARA PROGRAMADOR, DEVOPS Y DBA
+================================================================================
+Documento de Referencia Técnica del Sistema GV-Security
+Fecha de Creación: 2026-10-26
+
+Este archivo contiene las especificaciones técnicas, instrucciones de despliegue,
+restauración de base de datos y políticas de seguridad extraídas de las vistas de
+administración para consulta exclusiva del equipo de desarrollo y soporte.
+
+--------------------------------------------------------------------------------
+1. CONFIGURACIÓN DEL SERVIDOR DE FOTOS Y ARCHIVOS ESTÁTICOS
+--------------------------------------------------------------------------------
+Las fotos de anuncios y eventos son almacenadas en el sistema de archivos del
+servidor backend para mantener la base de datos MySQL ligera y optimizada.
+
+• Carpeta en servidor Express:
+  gv_security_api/uploads/anuncios/
+
+• Formato de ruta almacenado en base de datos:
+  Tabla: TBL_ANUNCIOS_EVENTOS
+  Columna: IMAGEN
+  Ejemplo: uploads/anuncios/anuncio_1767836197.jpg
+
+• Exposición de Archivos Estáticos (Express Static):
+  En `gv_security_api/src/index.js`, la carpeta se encuentra expuesta públicamente:
+  app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+
+• Endpoint de Carga (Multer):
+  Método: POST
+  Ruta: /api/admin/anuncios/upload
+  Header: Content-Type: multipart/form-data
+  Campo de archivo: foto
+  Respuesta: { success: true, url: "uploads/anuncios/anuncio_..." }
+
+• Despliegue en Producción (Render / Railway / AWS):
+  ATENCIÓN: En servicios serverless o contenedores efímeros (como el plan estándar
+  de Render o Railway), el disco local se reinicia con cada despliegue o reinicio
+  del contenedor.
+  Recomendación:
+  1) Render: Adjuntar un "Persistent Disk" en el servicio montado en la ruta
+     `/uploads` o `/opt/render/project/src/gv_security_api/uploads`.
+  2) O bien conectar un bucket S3 / Cloudinary actualizando `src/config/upload.js`.
+
+--------------------------------------------------------------------------------
+2. INSTRUCCIONES DE RESTAURACIÓN DE BASE DE DATOS MYSQL
+--------------------------------------------------------------------------------
+La función de respaldo ("Respaldo de BD" exclusivo para Super Usuarios) genera un
+archivo `.sql` estándar que incluye tanto la definición de tablas (DDL) como
+los datos completos (DML).
+
+• Restauración por Consola CLI:
+  mysql -h <HOST_DB> -P <PUERTO> -u <USUARIO> -p <NOMBRE_BD> < gv_security_backup.sql
+
+  Ejemplo (Railway MySQL):
+  mysql -h crossover.proxy.rlwy.net -P 34880 -u root -p railway < gv_security_backup.sql
+
+• Características Técnicas del Dump Generado:
+  - Claves Foráneas: El archivo incluye `SET FOREIGN_KEY_CHECKS = 0;` al inicio
+    y `SET FOREIGN_KEY_CHECKS = 1;` al final para evitar conflictos de orden de
+    inserción o dependencias circulares entre tablas.
+  - Transaccional: El volcado de datos se ejecuta protegido por `START TRANSACTION;`
+    y `COMMIT;` para asegurar la integridad atómica.
+  - Codificación de Caracteres: UTF-8 Multibyte (`utf8mb4`), compatible con tildes,
+    eñes y símbolos especiales.
+  - Compatibilidad: Compatible con MySQL Workbench, phpMyAdmin, DBeaver, HeidiSQL
+    y consola nativa `mysql`.
+
+--------------------------------------------------------------------------------
+3. POLÍTICA DE SEGURIDAD Y ASIGNACIÓN DE ROLES
+--------------------------------------------------------------------------------
+• Exclusión del Rol Super Administrador (ID_ROL = 1):
+  Por motivos de seguridad, el rol "SUPER ADMINISTRADOR" ha sido completamente
+  removido de los formularios y selectores de la aplicación web y móvil.
+  Ningún administrador estándar puede elevar privilegios a Super Usuario desde la UI.
+
+• Asignación Manual de Super Administrador (Nivel DBA):
+  Cualquier nuevo Super Usuario deberá ser asignado directamente a nivel de base
+  de datos ejecutando la siguiente sentencia SQL:
+
+  UPDATE TBL_MS_USUARIO 
+  SET ID_ROL = 1 
+  WHERE EMAIL = 'correo_del_usuario@dominio.com';
+
+• Catálogo de Roles del Sistema:
+  - ID_ROL = 1 : SUPER ADMINISTRADOR (Acceso total, auditoría, respaldo de BD)
+  - ID_ROL = 2 : ADMINISTRADOR (Gestión de condominios, residentes, anuncios, analítica)
+  - ID_ROL = 3 : GUARDIA (Escáner de QR en caseta, geocerca GPS, lectura de avisos)
+  - ID_ROL = 4 : RESIDENTE (Generación de visitas QR, reservaciones, alertas de llegada)
+
+--------------------------------------------------------------------------------
+4. SEPARACIÓN Y FLUJO DE NOTIFICACIONES (ANUNCIOS VS ALERTAS)
+--------------------------------------------------------------------------------
+• ANUNCIOS:
+  - Origen: Tabla `TBL_ANUNCIOS_EVENTOS`.
+  - Creados por: Administrador / Super Administrador desde el panel administrativo.
+  - Destinatarios: Toda la comunidad (Residentes y Guardias).
+  - Contenido: Avisos institucionales, mantenimientos programados, normas de caseta.
+  - Admite imagen adjunta opcional.
+
+• ALERTAS:
+  - Origen: Tabla `TBL_NOTIFICACIONES_APP`.
+  - Generadas por: Caseta de guardia al confirmar el ingreso de un visitante con QR
+    o registrar una novedad/comportamiento.
+  - Destinatarios: Residentes del condominio específico de la visita.
+  - Notificación Push: Envío automático mediante Firebase Cloud Messaging (FCM).
+
+• VISTA PARA GUARDIAS:
+  - Los guardias tienen acceso directo a la vista de Notificaciones (`/notifications`)
+    desde el botón "Avisos" en el encabezado del escáner y la barra de navegación.
+  - Permite a los guardias estar informados en tiempo real de directivas de seguridad.
+================================================================================

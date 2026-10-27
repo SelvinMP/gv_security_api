@@ -20,5 +20,7 @@ router.get('/contact-types', authController.getContactTypes);
 router.get('/relationships', authController.getRelationships);
 router.get('/condos', authController.getCondos);
 router.post('/save-fcm-token', authController.saveFCMToken);
+router.get('/push-status/:usuarioId', authController.getPushStatus);
+router.post('/set-push-status', authController.setPushStatus);
 
 module.exports = router;

@@ -1390,8 +1390,9 @@ const sendPushNotificationAndAnnouncement = async (req, res) => {
       WHERE ${userFilter};
     `);
 
-    // 3. Insertar en TBL_NOTIFICACIONES_APP para cada usuario si notificarApp es true
-    if (notificarApp !== false && targetUsers.length > 0) {
+    // 3. Insertar en TBL_NOTIFICACIONES_APP solo si no se publica como anuncio general en muro
+    // para mantener separadas las alertas de visitas de los comunicados de administración
+    if (notificarApp !== false && publicarMuro === false && targetUsers.length > 0) {
       for (const u of targetUsers) {
         await connection.query(`
           INSERT INTO TBL_NOTIFICACIONES_APP (ID_USUARIO, TITULO, MENSAJE, FECHA_HORA, LEIDA)

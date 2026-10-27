@@ -836,28 +836,64 @@ const changePassword = async (req, res) => {
 const saveFCMToken = async (req, res) => {
   const { id_usuario, fcm_token } = req.body;
   
-  console.log(`[FCM] Intentando guardar token para usuario ${id_usuario}`);
-  
-  if (!id_usuario || !fcm_token) {
-    console.warn(`[FCM] Datos incompletos: id_usuario=${id_usuario}, fcm_token=${fcm_token ? 'OK' : 'MISSING'}`);
-    return res.status(400).json({ message: "ID de usuario y Token son requeridos" });
+  if (!id_usuario) {
+    return res.status(400).json({ message: "ID de usuario es requerido" });
   }
+
+  const tokenVal = (!fcm_token || fcm_token === 'DISABLED') ? null : String(fcm_token).trim();
 
   let connection;
   try {
     connection = await mysqlPool.getConnection();
-    const [result] = await connection.query("UPDATE TBL_MS_USUARIO SET FCM_TOKEN = ? WHERE ID_USUARIO = ?", [fcm_token, id_usuario]);
+    const [result] = await connection.query("UPDATE TBL_MS_USUARIO SET FCM_TOKEN = ? WHERE ID_USUARIO = ?", [tokenVal, id_usuario]);
     
     if (result.affectedRows === 0) {
-      console.warn(`[FCM] No se encontró el usuario ${id_usuario} para actualizar el token.`);
       return res.status(404).json({ success: false, message: "Usuario no encontrado" });
     }
 
-    console.log(`[FCM] Token guardado exitosamente para usuario ${id_usuario}`);
-    res.json({ success: true, message: "Token FCM guardado correctamente" });
+    res.json({ success: true, enabled: !!tokenVal, message: tokenVal ? "Token FCM guardado correctamente" : "Token FCM eliminado" });
   } catch (error) {
-    console.error("[FCM] Error al guardar el token en la DB:", error);
+    console.error("[FCM] Error al actualizar token:", error);
     res.status(500).json({ message: "Error al guardar el token" });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+const getPushStatus = async (req, res) => {
+  const { usuarioId } = req.params;
+  if (!usuarioId) return res.status(400).json({ message: "ID de usuario es requerido" });
+
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const [rows] = await connection.query("SELECT FCM_TOKEN FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?", [usuarioId]);
+    if (rows.length === 0) return res.status(404).json({ message: "Usuario no encontrado" });
+    
+    const token = rows[0].FCM_TOKEN;
+    const isEnabled = !!token && token !== 'DISABLED' && token.trim().length > 10;
+    res.json({ success: true, enabled: isEnabled });
+  } catch (error) {
+    console.error("Error al obtener estado push:", error);
+    res.status(500).json({ message: "Error al consultar estado push" });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+const setPushStatus = async (req, res) => {
+  const { id_usuario, enabled, fcm_token } = req.body;
+  if (!id_usuario) return res.status(400).json({ message: "ID de usuario es requerido" });
+
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const tokenVal = (enabled && fcm_token && fcm_token !== 'DISABLED') ? String(fcm_token).trim() : null;
+    await connection.query("UPDATE TBL_MS_USUARIO SET FCM_TOKEN = ? WHERE ID_USUARIO = ?", [tokenVal, id_usuario]);
+    res.json({ success: true, enabled: !!tokenVal });
+  } catch (error) {
+    console.error("Error al actualizar estado push:", error);
+    res.status(500).json({ message: "Error al actualizar estado de notificaciones push" });
   } finally {
     if (connection) connection.release();
   }
@@ -885,5 +921,7 @@ module.exports = {
   approveUser,
   rejectUser,
   changePassword,
-  saveFCMToken
+  saveFCMToken,
+  getPushStatus,
+  setPushStatus
 };
