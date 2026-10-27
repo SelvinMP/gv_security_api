@@ -258,6 +258,16 @@ const getDashboardStats = async (req, res) => {
     const residentesAsignados = Number(condoMetrics[0]?.residentes_asignados || 0);
     const tasaOcupacion = totalCondominios > 0 ? Math.round((condominiosOcupados / totalCondominios) * 100) : 0;
 
+    // ── Documentación / Identificación de Personas ──
+    const [personasDocCounts] = await connection.query(`
+      SELECT 
+        COUNT(*) AS total_personas,
+        SUM(CASE WHEN DNI_PERSONA IS NOT NULL AND DNI_PERSONA != '' THEN 1 ELSE 0 END) AS con_dni,
+        SUM(CASE WHEN NUM_CARNET_EXTRANJERO IS NOT NULL AND NUM_CARNET_EXTRANJERO != '' THEN 1 ELSE 0 END) AS extranjeros,
+        SUM(CASE WHEN ID_CONDOMINIO IS NOT NULL THEN 1 ELSE 0 END) AS con_condominio
+      FROM TBL_PERSONAS;
+    `);
+
     // ── Estadísticas de Geocerca y Auditoría ──
     const [geocercaStats] = await connection.query(`
       SELECT 
@@ -272,10 +282,19 @@ const getDashboardStats = async (req, res) => {
         usuarios: {
           ...userCounts[0],
           estados: estadosDetalle,
-          roles: rolesDetalle
+          roles: rolesDetalle,
+          documentos: {
+            con_dni: Number(personasDocCounts[0]?.con_dni || 0),
+            extranjeros: Number(personasDocCounts[0]?.extranjeros || 0),
+            total_personas: Number(personasDocCounts[0]?.total_personas || 0)
+          }
         },
         reservas: {
           ...reservaCounts[0],
+          total_reservas: Number(reservaCounts[0]?.total_reservas || 0),
+          reservas_confirmadas: Number(reservaCounts[0]?.reservas_confirmadas || 0),
+          reservas_pendientes: Number(reservaCounts[0]?.reservas_pendientes || 0),
+          reservas_canceladas: Number(reservaCounts[0]?.reservas_canceladas || 0),
           porInstalacion: reservasPorInstalacion,
           proximas: proximasReservas
         },
