@@ -520,7 +520,8 @@ const getFormOptions = async (req, res) => {
   try {
     connection = await mysqlPool.getConnection();
 
-    const [roles] = await connection.query('SELECT ID_ROL, ROL, DESCRIPCION FROM TBL_MS_ROLES ORDER BY ID_ROL ASC');
+    // Excluir rol 1 (SUPER ADMINISTRADOR) para que no pueda ser asignado desde la app
+    const [roles] = await connection.query('SELECT ID_ROL, ROL, DESCRIPCION FROM TBL_MS_ROLES WHERE ID_ROL != 1 AND UPPER(ROL) NOT LIKE "%SUPER%" ORDER BY ID_ROL ASC');
     const [estadosUsuario] = await connection.query('SELECT ID_ESTADO_USUARIO, DESCRIPCION FROM TBL_ESTADO_USUARIO ORDER BY ID_ESTADO_USUARIO ASC');
     const [estadosReserva] = await connection.query('SELECT ID_ESTADO_RESERVA, DESCRIPCION FROM TBL_ESTADO_RESERVA ORDER BY ID_ESTADO_RESERVA ASC');
     const [tiposCondominio] = await connection.query('SELECT ID_TIPO_CONDOMINIO, DESCRIPCION FROM TBL_TIPO_CONDOMINIO ORDER BY ID_TIPO_CONDOMINIO ASC');
@@ -857,6 +858,12 @@ const createMaintenanceRecord = async (req, res) => {
           return res.status(400).json({ success: false, message: 'Nombre, email y contraseña son obligatorios.' });
         }
 
+        // Proteger el rol de Super Administrador
+        if (Number(ID_ROL) === 1) {
+          await connection.rollback();
+          return res.status(403).json({ success: false, message: 'El rol de Super Administrador solo puede ser asignado a nivel de base de datos.' });
+        }
+
         const [exists] = await connection.query('SELECT ID_USUARIO FROM TBL_MS_USUARIO WHERE EMAIL = ?', [EMAIL]);
         if (exists.length > 0) {
           return res.status(400).json({ success: false, message: 'El correo electrónico ya está registrado.' });
@@ -986,6 +993,12 @@ const updateMaintenanceRecord = async (req, res) => {
     switch (table) {
       case 'usuarios': {
         const { NOMBRE_USUARIO, EMAIL, CONTRASEÑA, ID_ROL, ID_ESTADO_USUARIO, DNI_PERSONA, ID_CONDOMINIO } = updates;
+
+        // Proteger el rol de Super Administrador
+        if (ID_ROL !== undefined && Number(ID_ROL) === 1) {
+          await connection.rollback();
+          return res.status(403).json({ success: false, message: 'El rol de Super Administrador solo puede ser asignado a nivel de base de datos.' });
+        }
 
         let passwordQuery = '';
         const params = [NOMBRE_USUARIO, EMAIL, ID_ROL, ID_ESTADO_USUARIO];
@@ -1160,6 +1173,138 @@ const deleteMaintenanceRecord = async (req, res) => {
   }
 };
 
+/**
+ * 9. Resumen de la Base de Datos para pantalla de Respaldo (Solo Super Admin)
+ */
+const getDatabaseBackupSummary = async (req, res) => {
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const [tablesRaw] = await connection.query('SHOW FULL TABLES WHERE Table_type = "BASE TABLE"');
+
+    const tables = [];
+    let totalRows = 0;
+
+    for (const t of tablesRaw) {
+      const tableName = Object.values(t)[0];
+      try {
+        const [[{ count }]] = await connection.query(`SELECT COUNT(*) as count FROM \`${tableName}\``);
+        totalRows += count;
+        tables.push({ name: tableName, rows: count });
+      } catch {
+        tables.push({ name: tableName, rows: 0 });
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        databaseName: process.env.DB_NAME || 'railway',
+        host: process.env.DB_HOST || 'MySQL Cloud Host',
+        port: process.env.DB_PORT || 3306,
+        dialect: 'MySQL',
+        totalTables: tables.length,
+        totalRows,
+        tables,
+        generatedAt: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    console.error('Error al obtener resumen de base de datos:', error);
+    res.status(500).json({ success: false, message: 'Error al consultar resumen de base de datos.' });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+/**
+ * 10. Generación y descarga del Respaldo SQL Completo (.sql) (Solo Super Admin)
+ */
+const downloadDatabaseBackup = async (req, res) => {
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const [tablesRaw] = await connection.query('SHOW FULL TABLES WHERE Table_type = "BASE TABLE"');
+
+    const dbName = process.env.DB_NAME || 'railway';
+    const now = new Date();
+    const dateFormatted = now.toISOString().replace(/T/, '_').replace(/:/g, '-').split('.')[0];
+    const filename = `gv_security_backup_${dbName}_${dateFormatted}.sql`;
+
+    let sqlDump = `-- ========================================================\n`;
+    sqlDump += `-- GV-SECURITY APP - RESPALDO INTEGRAL DE BASE DE DATOS\n`;
+    sqlDump += `-- Base de Datos: ${dbName}\n`;
+    sqlDump += `-- Servidor Host: ${process.env.DB_HOST || 'MySQL'}\n`;
+    sqlDump += `-- Fecha y Hora: ${now.toLocaleString('es-HN', { timeZone: 'America/Tegucigalpa' })} (UTC: ${now.toISOString()})\n`;
+    sqlDump += `-- Solicitado por Super Administrador: ${req.user?.nombre_usuario || req.user?.id || 'Super Usuario'}\n`;
+    sqlDump += `-- Total de Tablas: ${tablesRaw.length}\n`;
+    sqlDump += `-- ========================================================\n\n`;
+    sqlDump += `SET NAMES utf8mb4;\n`;
+    sqlDump += `SET FOREIGN_KEY_CHECKS = 0;\n`;
+    sqlDump += `SET SQL_MODE = "NO_AUTO_VALUE_ON_ZERO";\n`;
+    sqlDump += `SET AUTOCOMMIT = 0;\n`;
+    sqlDump += `START TRANSACTION;\n`;
+    sqlDump += `SET time_zone = "+00:00";\n\n`;
+
+    for (const tableObj of tablesRaw) {
+      const tableName = Object.values(tableObj)[0];
+
+      sqlDump += `-- --------------------------------------------------------\n`;
+      sqlDump += `-- Estructura de tabla para \`${tableName}\`\n`;
+      sqlDump += `-- --------------------------------------------------------\n`;
+      sqlDump += `DROP TABLE IF EXISTS \`${tableName}\`;\n`;
+
+      const [createTableResult] = await connection.query(`SHOW CREATE TABLE \`${tableName}\``);
+      if (createTableResult.length > 0) {
+        const createSql = createTableResult[0]['Create Table'] || Object.values(createTableResult[0])[1];
+        sqlDump += `${createSql};\n\n`;
+      }
+
+      // Volcado de datos
+      const [rows] = await connection.query(`SELECT * FROM \`${tableName}\``);
+      if (rows.length > 0) {
+        sqlDump += `-- Volcado de datos para la tabla \`${tableName}\` (${rows.length} registros)\n`;
+        sqlDump += `LOCK TABLES \`${tableName}\` WRITE;\n`;
+
+        const cols = Object.keys(rows[0]).map(c => `\`${c}\``).join(', ');
+
+        const chunkSize = 100;
+        for (let i = 0; i < rows.length; i += chunkSize) {
+          const chunk = rows.slice(i, i + chunkSize);
+          const valuesStr = chunk.map(row => {
+            const rowVals = Object.values(row).map(val => connection.escape(val)).join(', ');
+            return `  (${rowVals})`;
+          }).join(',\n');
+
+          sqlDump += `INSERT INTO \`${tableName}\` (${cols}) VALUES\n${valuesStr};\n`;
+        }
+
+        sqlDump += `UNLOCK TABLES;\n\n`;
+      } else {
+        sqlDump += `-- (Tabla \`${tableName}\` sin registros)\n\n`;
+      }
+    }
+
+    sqlDump += `COMMIT;\n`;
+    sqlDump += `SET FOREIGN_KEY_CHECKS = 1;\n`;
+    sqlDump += `-- ========================================================\n`;
+    sqlDump += `-- Fin del Respaldo de Base de Datos GV-SECURITY\n`;
+    sqlDump += `-- ========================================================\n`;
+
+    console.log(`[BACKUP] Respaldo generado con éxito (${filename}) - Tamaño: ${(Buffer.byteLength(sqlDump, 'utf8') / 1024).toFixed(2)} KB`);
+
+    res.setHeader('Content-Type', 'application/sql; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.status(200).send(sqlDump);
+
+  } catch (error) {
+    console.error('Error al generar respaldo de BD:', error);
+    res.status(500).json({ success: false, message: 'Error interno al generar el respaldo de la base de datos.' });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
 module.exports = {
   getDashboardStats,
   getGeocercaConfig,
@@ -1168,5 +1313,7 @@ module.exports = {
   getMaintenanceTable,
   createMaintenanceRecord,
   updateMaintenanceRecord,
-  deleteMaintenanceRecord
+  deleteMaintenanceRecord,
+  getDatabaseBackupSummary,
+  downloadDatabaseBackup
 };

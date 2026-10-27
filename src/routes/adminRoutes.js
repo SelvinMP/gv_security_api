@@ -31,4 +31,9 @@ router.put('/maintenance/:table/:id', adminController.updateMaintenanceRecord);
 // 8. Tablas de mantenimiento (Eliminación - DELETE)
 router.delete('/maintenance/:table/:id', adminController.deleteMaintenanceRecord);
 
+// 9. Respaldo integral de la base de datos (¡SOLO SUPER ADMINISTRADOR = 1!)
+router.get('/backup/summary', requireSuperAdmin, adminController.getDatabaseBackupSummary);
+router.get('/backup', requireSuperAdmin, adminController.downloadDatabaseBackup);
+
 module.exports = router;
+
