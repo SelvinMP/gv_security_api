@@ -1,5 +1,6 @@
 const { mysqlPool } = require('../config/db');
 const bcrypt = require('bcrypt');
+const moment = require('moment-timezone');
 
 /**
  * 1. Obtiene métricas y estadísticas consolidadas para el Dashboard Administrativo
@@ -107,13 +108,24 @@ const getDashboardStats = async (req, res) => {
     `);
 
     // ── Estadísticas de Accesos / Visitas ──
+    const fechaHoyHn = moment().tz("America/Tegucigalpa").format("YYYY-MM-DD");
+
     const [visitaCounts] = await connection.query(`
       SELECT 
         (SELECT COUNT(*) FROM TBL_BITACORA_VISITA) AS total_accesos_bitacora,
-        (SELECT COUNT(*) FROM TBL_BITACORA_VISITA WHERE DATE(COALESCE(FECHA_ACCESO, FECHA_HORA)) = CURDATE()) AS accesos_hoy,
+        (SELECT COUNT(*) FROM TBL_BITACORA_VISITA 
+         WHERE DATE(COALESCE(FECHA_ACCESO, FECHA_HORA)) = ? 
+            OR (
+              NOT EXISTS (SELECT 1 FROM TBL_BITACORA_VISITA WHERE DATE(COALESCE(FECHA_ACCESO, FECHA_HORA)) = ?)
+              AND (
+                DATE(COALESCE(FECHA_ACCESO, FECHA_HORA)) = CURDATE()
+                OR DATE(COALESCE(FECHA_ACCESO, FECHA_HORA)) = (SELECT DATE(MAX(COALESCE(FECHA_ACCESO, FECHA_HORA))) FROM TBL_BITACORA_VISITA)
+              )
+            )
+        ) AS accesos_hoy,
         (SELECT COUNT(*) FROM TBL_REGVISITAS) AS total_visitas_generadas,
         (SELECT COUNT(*) FROM TBL_VISITANTES_RECURRENTES) AS total_recurrentes_creados;
-    `);
+    `, [fechaHoyHn, fechaHoyHn]);
 
     // ── Tendencia Día (Últimas 24 horas por bloques de 2 horas) ──
     const [visitasDiaRaw] = await connection.query(`
@@ -121,14 +133,25 @@ const getDashboardStats = async (req, res) => {
         HOUR(COALESCE(FECHA_ACCESO, FECHA_HORA)) AS hora,
         COUNT(*) AS total_accesos
       FROM TBL_BITACORA_VISITA
-      WHERE DATE(COALESCE(FECHA_ACCESO, FECHA_HORA)) = CURDATE()
-         OR DATE(COALESCE(FECHA_ACCESO, FECHA_HORA)) = (SELECT DATE(MAX(COALESCE(FECHA_ACCESO, FECHA_HORA))) FROM TBL_BITACORA_VISITA)
+      WHERE DATE(COALESCE(FECHA_ACCESO, FECHA_HORA)) = ?
+         OR (
+           NOT EXISTS (SELECT 1 FROM TBL_BITACORA_VISITA WHERE DATE(COALESCE(FECHA_ACCESO, FECHA_HORA)) = ?)
+           AND (
+             DATE(COALESCE(FECHA_ACCESO, FECHA_HORA)) = CURDATE()
+             OR DATE(COALESCE(FECHA_ACCESO, FECHA_HORA)) = (SELECT DATE(MAX(COALESCE(FECHA_ACCESO, FECHA_HORA))) FROM TBL_BITACORA_VISITA)
+           )
+         )
       GROUP BY HOUR(COALESCE(FECHA_ACCESO, FECHA_HORA))
       ORDER BY hora ASC;
-    `);
+    `, [fechaHoyHn, fechaHoyHn]);
 
+    let sumDiaTotal = 0;
     const horasMap = {};
-    visitasDiaRaw.forEach(r => { horasMap[r.hora] = Number(r.total_accesos); });
+    visitasDiaRaw.forEach(r => { 
+      const cnt = Number(r.total_accesos);
+      horasMap[r.hora] = cnt; 
+      sumDiaTotal += cnt;
+    });
     const tendenciaDia = [];
     for (let h = 0; h < 24; h += 2) {
       const sum = (horasMap[h] || 0) + (horasMap[h + 1] || 0);
@@ -137,6 +160,8 @@ const getDashboardStats = async (req, res) => {
         total_accesos: sum
       });
     }
+
+    const accesosHoyValidados = Math.max(Number(visitaCounts[0]?.accesos_hoy || 0), sumDiaTotal);
 
     // ── Tendencia Semana (Últimos 7 días con nombres de días) ──
     const [tendenciaSemana] = await connection.query(`
@@ -153,18 +178,18 @@ const getDashboardStats = async (req, res) => {
         END AS dia_semana,
         COALESCE(COUNT(bv.ID_BITACORA_VISITA), 0) AS total_accesos
       FROM (
-        SELECT CURDATE() - INTERVAL 6 DAY AS dia UNION ALL
-        SELECT CURDATE() - INTERVAL 5 DAY UNION ALL
-        SELECT CURDATE() - INTERVAL 4 DAY UNION ALL
-        SELECT CURDATE() - INTERVAL 3 DAY UNION ALL
-        SELECT CURDATE() - INTERVAL 2 DAY UNION ALL
-        SELECT CURDATE() - INTERVAL 1 DAY UNION ALL
-        SELECT CURDATE()
+        SELECT DATE(?) - INTERVAL 6 DAY AS dia UNION ALL
+        SELECT DATE(?) - INTERVAL 5 DAY UNION ALL
+        SELECT DATE(?) - INTERVAL 4 DAY UNION ALL
+        SELECT DATE(?) - INTERVAL 3 DAY UNION ALL
+        SELECT DATE(?) - INTERVAL 2 DAY UNION ALL
+        SELECT DATE(?) - INTERVAL 1 DAY UNION ALL
+        SELECT DATE(?)
       ) d
       LEFT JOIN TBL_BITACORA_VISITA bv ON DATE(COALESCE(bv.FECHA_ACCESO, bv.FECHA_HORA)) = d.dia
       GROUP BY d.dia
       ORDER BY d.dia ASC;
-    `);
+    `, [fechaHoyHn, fechaHoyHn, fechaHoyHn, fechaHoyHn, fechaHoyHn, fechaHoyHn, fechaHoyHn]);
 
     // ── Tendencia Mes (Últimos 30 días día a día) ──
     const [visitasMesRaw] = await connection.query(`
@@ -172,15 +197,15 @@ const getDashboardStats = async (req, res) => {
         DATE_FORMAT(COALESCE(FECHA_ACCESO, FECHA_HORA), '%d/%m') AS fecha,
         COUNT(*) AS total_accesos
       FROM TBL_BITACORA_VISITA
-      WHERE COALESCE(FECHA_ACCESO, FECHA_HORA) >= CURDATE() - INTERVAL 30 DAY
+      WHERE COALESCE(FECHA_ACCESO, FECHA_HORA) >= DATE(?) - INTERVAL 30 DAY
       GROUP BY DATE_FORMAT(COALESCE(FECHA_ACCESO, FECHA_HORA), '%d/%m');
-    `);
+    `, [fechaHoyHn]);
 
     const mesMap = {};
     visitasMesRaw.forEach(r => { mesMap[r.fecha] = Number(r.total_accesos); });
 
     const [dias30] = await connection.query(`
-      SELECT DATE_FORMAT(CURDATE() - INTERVAL n DAY, '%d/%m') AS fecha
+      SELECT DATE_FORMAT(DATE(?) - INTERVAL n DAY, '%d/%m') AS fecha
       FROM (
         SELECT 29 AS n UNION ALL SELECT 28 UNION ALL SELECT 27 UNION ALL SELECT 26 UNION ALL SELECT 25 UNION ALL
         SELECT 24 UNION ALL SELECT 23 UNION ALL SELECT 22 UNION ALL SELECT 21 UNION ALL SELECT 20 UNION ALL
@@ -190,7 +215,7 @@ const getDashboardStats = async (req, res) => {
         SELECT 4 UNION ALL SELECT 3 UNION ALL SELECT 2 UNION ALL SELECT 1 UNION ALL SELECT 0
       ) seq
       ORDER BY n DESC;
-    `);
+    `, [fechaHoyHn]);
 
     const tendenciaMes = dias30.map(d => ({
       fecha: d.fecha,
@@ -273,8 +298,8 @@ const getDashboardStats = async (req, res) => {
       SELECT 
         (SELECT COUNT(*) FROM TBL_GEOCERCAS WHERE ACTIVO = 1) AS geocercas_activas,
         (SELECT COUNT(*) FROM TBL_LOG_ESCANEO_FALLIDO) AS total_escaneos_fallidos,
-        (SELECT COUNT(*) FROM TBL_LOG_ESCANEO_FALLIDO WHERE DATE(FECHA_HORA) = CURDATE()) AS fallidos_hoy;
-    `);
+        (SELECT COUNT(*) FROM TBL_LOG_ESCANEO_FALLIDO WHERE DATE(FECHA_HORA) = ? OR DATE(FECHA_HORA) = CURDATE()) AS fallidos_hoy;
+    `, [fechaHoyHn]);
 
     res.status(200).json({
       success: true,
@@ -300,6 +325,7 @@ const getDashboardStats = async (req, res) => {
         },
         visitas: {
           ...visitaCounts[0],
+          accesos_hoy: accesosHoyValidados,
           tendenciaSemanal: tendenciaSemana,
           tendenciaDia,
           tendenciaSemana,
