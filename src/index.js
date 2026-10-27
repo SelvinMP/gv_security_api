@@ -28,10 +28,10 @@ app.use(cors({
   credentials: true
 }));
 
-// Ajuste opcional para Helmet en desarrollo (evita bloqueos de recursos)
-app.use(helmet({
-  contentSecurityPolicy: false,
-}));
+const path = require('path');
+
+// Servir archivos estáticos subidos en el servidor (imágenes de anuncios, avatares, fotos)
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 
 

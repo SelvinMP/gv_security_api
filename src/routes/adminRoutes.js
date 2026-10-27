@@ -31,9 +31,18 @@ router.put('/maintenance/:table/:id', adminController.updateMaintenanceRecord);
 // 8. Tablas de mantenimiento (Eliminación - DELETE)
 router.delete('/maintenance/:table/:id', adminController.deleteMaintenanceRecord);
 
+const { uploadAnuncio } = require('../config/upload');
+
 // 9. Respaldo integral de la base de datos (¡SOLO SUPER ADMINISTRADOR = 1!)
 router.get('/backup/summary', requireSuperAdmin, adminController.getDatabaseBackupSummary);
 router.get('/backup', requireSuperAdmin, adminController.downloadDatabaseBackup);
 
+// 10. Gestión de Notificaciones Push y Anuncios
+router.post('/anuncios/upload', uploadAnuncio.single('imagen'), adminController.uploadAnnouncementImage);
+router.post('/notificaciones/enviar', adminController.sendPushNotificationAndAnnouncement);
+router.get('/anuncios', adminController.getAnnouncementsList);
+router.delete('/anuncios/:id', adminController.deleteAnnouncement);
+
 module.exports = router;
+
 

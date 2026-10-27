@@ -1305,6 +1305,229 @@ const downloadDatabaseBackup = async (req, res) => {
   }
 };
 
+/**
+ * 11. Subida de imagen para anuncios y notificaciones push
+ */
+const uploadAnnouncementImage = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No se ha proporcionado ningún archivo de imagen.' });
+    }
+
+    const relativePath = `uploads/anuncios/${req.file.filename}`;
+    const host = req.get('host');
+    const protocol = req.protocol;
+    const fullUrl = `${protocol}://${host}/${relativePath}`;
+
+    res.status(200).json({
+      success: true,
+      message: 'Imagen subida exitosamente al servidor.',
+      data: {
+        filename: req.file.filename,
+        path: relativePath,
+        fullUrl: fullUrl,
+        size: req.file.size,
+        mimetype: req.file.mimetype
+      }
+    });
+  } catch (error) {
+    console.error('Error al subir imagen de anuncio:', error);
+    res.status(500).json({ success: false, message: 'Error interno al procesar la imagen.' });
+  }
+};
+
+/**
+ * 12. Envío de Notificaciones Push y publicación en muro de Anuncios/Eventos
+ */
+const sendPushNotificationAndAnnouncement = async (req, res) => {
+  const {
+    titulo,
+    mensaje,
+    imagen,
+    destinatarios,
+    publicarMuro,
+    notificarApp,
+    enviarPushFCM
+  } = req.body;
+
+  if (!titulo || !mensaje) {
+    return res.status(400).json({ success: false, message: 'El título y el mensaje son obligatorios.' });
+  }
+
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    await connection.beginTransaction();
+
+    let anuncioId = null;
+
+    // 1. Guardar en TBL_ANUNCIOS_EVENTOS si publicarMuro es true
+    if (publicarMuro !== false) {
+      const [insertAnuncio] = await connection.query(`
+        INSERT INTO TBL_ANUNCIOS_EVENTOS (ID_ESTADO_ANUNCIO_EVENTO, TITULO, DESCRIPCION, IMAGEN, FECHA_HORA)
+        VALUES (1, ?, ?, ?, NOW());
+      `, [
+        titulo.slice(0, 100).trim(),
+        mensaje.slice(0, 800).trim(),
+        imagen ? String(imagen).trim() : null
+      ]);
+      anuncioId = insertAnuncio.insertId;
+    }
+
+    // 2. Determinar usuarios destinatarios
+    let userFilter = 'ID_ESTADO_USUARIO = 1';
+    if (destinatarios === 'residentes') {
+      userFilter += ' AND ID_ROL = 2';
+    } else if (destinatarios === 'guardias') {
+      userFilter += ' AND ID_ROL = 3';
+    } else if (destinatarios === 'admins') {
+      userFilter += ' AND ID_ROL IN (1, 4)';
+    }
+
+    const [targetUsers] = await connection.query(`
+      SELECT ID_USUARIO, NOMBRE_USUARIO, EMAIL, FCM_TOKEN, ID_ROL 
+      FROM TBL_MS_USUARIO 
+      WHERE ${userFilter};
+    `);
+
+    // 3. Insertar en TBL_NOTIFICACIONES_APP para cada usuario si notificarApp es true
+    if (notificarApp !== false && targetUsers.length > 0) {
+      for (const u of targetUsers) {
+        await connection.query(`
+          INSERT INTO TBL_NOTIFICACIONES_APP (ID_USUARIO, TITULO, MENSAJE, FECHA_HORA, LEIDA)
+          VALUES (?, ?, ?, NOW(), 0);
+        `, [u.ID_USUARIO, titulo.slice(0, 150).trim(), mensaje.trim()]);
+      }
+    }
+
+    await connection.commit();
+
+    // 4. Si enviarPushFCM es true, enviar a través de Firebase Cloud Messaging
+    const fcmTokens = targetUsers
+      .map(u => u.FCM_TOKEN)
+      .filter(token => token && typeof token === 'string' && token.trim().length > 10);
+
+    let pushSuccessCount = 0;
+    let pushFailureCount = 0;
+
+    let firebaseAdmin = null;
+    try {
+      const admin = require('firebase-admin');
+      if (admin.apps.length > 0) {
+        firebaseAdmin = admin;
+      }
+    } catch {
+      // Firebase opcional si falta configuración
+    }
+
+    if (enviarPushFCM !== false && fcmTokens.length > 0 && firebaseAdmin) {
+      try {
+        const payload = {
+          notification: {
+            title: titulo,
+            body: mensaje
+          },
+          data: {
+            tipo: 'anuncio',
+            anuncioId: String(anuncioId || ''),
+            fecha: new Date().toISOString()
+          },
+          tokens: fcmTokens
+        };
+
+        if (imagen) {
+          const host = req.get('host');
+          const protocol = req.protocol;
+          const fullImgUrl = imagen.startsWith('http') 
+            ? imagen 
+            : `${protocol}://${host}/${imagen.replace(/^\//, '')}`;
+          payload.notification.imageUrl = fullImgUrl;
+        }
+
+        const response = await firebaseAdmin.messaging().sendEachForMulticast(payload);
+        pushSuccessCount = response.successCount;
+        pushFailureCount = response.failureCount;
+        console.log(`[FCM PUSH] Notificaciones enviadas: ${pushSuccessCount} exitosas, ${pushFailureCount} fallidas.`);
+      } catch (fcmError) {
+        console.warn('[FCM PUSH] Advertencia al enviar multicast FCM:', fcmError.message);
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Notificación procesada y difundida exitosamente.',
+      data: {
+        anuncioId,
+        totalDestinatarios: targetUsers.length,
+        tokensFCMEncontrados: fcmTokens.length,
+        pushExitosos: pushSuccessCount,
+        pushFallidos: pushFailureCount,
+        imagenRuta: imagen || null
+      }
+    });
+
+  } catch (error) {
+    if (connection) await connection.rollback();
+    console.error('Error al enviar notificación push:', error);
+    res.status(500).json({ success: false, message: 'Error interno al procesar el envío de la notificación.' });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+/**
+ * 13. Obtiene la lista de todos los anuncios con estado y conteo de vistas
+ */
+const getAnnouncementsList = async (req, res) => {
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const [rows] = await connection.query(`
+      SELECT 
+        a.ID_ANUNCIOS_EVENTOS,
+        a.ID_ESTADO_ANUNCIO_EVENTO,
+        a.TITULO,
+        a.DESCRIPCION,
+        a.IMAGEN,
+        a.FECHA_HORA,
+        COUNT(DISTINCT o.ID_USUARIO) AS TOTAL_OCULTADOS
+      FROM TBL_ANUNCIOS_EVENTOS a
+      LEFT JOIN TBL_ANUNCIOS_OCULTOS o ON a.ID_ANUNCIOS_EVENTOS = o.ID_ANUNCIOS_EVENTOS
+      GROUP BY a.ID_ANUNCIOS_EVENTOS
+      ORDER BY a.FECHA_HORA DESC
+      LIMIT 100;
+    `);
+
+    res.status(200).json({
+      success: true,
+      data: rows
+    });
+  } catch (error) {
+    console.error('Error al obtener lista de anuncios:', error);
+    res.status(500).json({ success: false, message: 'Error al consultar anuncios.' });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+/**
+ * 14. Da de baja o elimina un anuncio
+ */
+const deleteAnnouncement = async (req, res) => {
+  const { id } = req.params;
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    await connection.query('UPDATE TBL_ANUNCIOS_EVENTOS SET ID_ESTADO_ANUNCIO_EVENTO = 2 WHERE ID_ANUNCIOS_EVENTOS = ?', [id]);
+    res.status(200).json({ success: true, message: 'Anuncio desactivado exitosamente.' });
+  } catch (error) {
+    console.error('Error al desactivar anuncio:', error);
+    res.status(500).json({ success: false, message: 'Error al desactivar anuncio.' });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
 module.exports = {
   getDashboardStats,
   getGeocercaConfig,
@@ -1315,5 +1538,10 @@ module.exports = {
   updateMaintenanceRecord,
   deleteMaintenanceRecord,
   getDatabaseBackupSummary,
-  downloadDatabaseBackup
+  downloadDatabaseBackup,
+  uploadAnnouncementImage,
+  sendPushNotificationAndAnnouncement,
+  getAnnouncementsList,
+  deleteAnnouncement
 };
+
