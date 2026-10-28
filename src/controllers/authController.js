@@ -135,15 +135,23 @@ const register = async (req, res) => {
     const mailOptions = {
       from: `"GV-Security Support" <${process.env.EMAIL_USER}>`,
       to: EMAIL,
-      subject: "Código de Verificación - Registro",
-      html: `<div style="font-family: sans-serif; border: 1px solid #ddd; padding: 25px; border-radius: 8px;">
-          <h2 style="color: #0E2041;">Verifica tu cuenta</h2>
-          <p>Hola <strong>${NOMBRE_USUARIO}</strong>,</p>
-          <p>Usa el siguiente código de un solo uso para completar tu registro en GV-Security:</p>
-          <p style="font-size: 32px; font-weight: bold; color: #d4af37; letter-spacing: 5px; margin: 20px 0;">${verificationCode}</p>
-          <p style="color: #555; font-size: 14px;">⏱️ Este código es válido durante <strong>10 minutos</strong>.</p>
-          <p style="color: #888; font-size: 12px; margin-top: 20px;">Si no solicitaste esto, ignora este correo con seguridad.</p>
-        </div>`
+      subject: "Código de Verificación - Registro GV-Security",
+      html: `
+        <div style="font-family: Arial, sans-serif; background-color: #f4f6f8; padding: 30px;">
+          <div style="max-width: 500px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; padding: 30px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-top: 5px solid #0E2041;">
+            <h2 style="color: #0E2041; margin-top: 0; font-size: 24px; text-align: center; font-weight: 800;">GV-Security</h2>
+            <h3 style="color: #333333; font-size: 18px; margin-bottom: 10px;">Verifica tu correo electrónico</h3>
+            <p style="color: #555555; font-size: 14px; line-height: 1.6;">Hola <strong>${NOMBRE_USUARIO}</strong>,</p>
+            <p style="color: #555555; font-size: 14px; line-height: 1.6;">Gracias por registrarte en <strong>GV-Security</strong>. Usa el siguiente código para completar la verificación de tu cuenta:</p>
+            <div style="background-color: #0E2041; border-radius: 8px; padding: 18px; text-align: center; margin: 25px 0;">
+              <span style="font-size: 34px; font-weight: bold; color: #d4af37; letter-spacing: 8px; font-family: monospace;">${verificationCode}</span>
+            </div>
+            <p style="color: #888888; font-size: 13px; text-align: center;">⏱️ Este código es válido durante <strong>10 minutos</strong> y es de un solo uso.</p>
+            <hr style="border: none; border-top: 1px solid #eeeeee; margin: 25px 0;" />
+            <p style="color: #999999; font-size: 12px; text-align: center; margin-bottom: 0;">Si no solicitaste este registro, puedes ignorar este mensaje de forma segura.</p>
+          </div>
+        </div>
+      `
     };
 
     try {
@@ -214,15 +222,23 @@ const login = async (req, res) => {
       const mailOptions = {
         from: `"GV-Security Support" <${process.env.EMAIL_USER}>`,
         to: username,
-        subject: "Código de Verificación 2FA",
-        html: `<div style="font-family: sans-serif; padding: 25px; border: 1px solid #ddd; border-radius: 8px;">
-            <h2 style="color: #0E2041;">Autenticación de Dos Pasos</h2>
-            <p>Hola,</p>
-            <p>Tu código de verificación de seguridad para acceder a tu cuenta es:</p>
-            <p style="font-size: 32px; font-weight: bold; color: #d4af37; letter-spacing: 5px; margin: 20px 0;">${verificationCode}</p>
-            <p style="color: #555; font-size: 14px;">⏱️ Este código es válido durante <strong>10 minutos</strong>.</p>
-            <p style="color: #888; font-size: 12px; margin-top: 20px;">Si no solicitaste este código, te recomendamos cambiar tu contraseña inmediatamente.</p>
-          </div>`
+        subject: "Código de Verificación 2FA - GV-Security",
+        html: `
+          <div style="font-family: Arial, sans-serif; background-color: #f4f6f8; padding: 30px;">
+            <div style="max-width: 500px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; padding: 30px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-top: 5px solid #0E2041;">
+              <h2 style="color: #0E2041; margin-top: 0; font-size: 24px; text-align: center; font-weight: 800;">GV-Security</h2>
+              <h3 style="color: #333333; font-size: 18px; margin-bottom: 10px;">Autenticación en Dos Pasos (2FA)</h3>
+              <p style="color: #555555; font-size: 14px; line-height: 1.6;">Hola,</p>
+              <p style="color: #555555; font-size: 14px; line-height: 1.6;">Se ha detectado un intento de inicio de sesión en tu cuenta. Usa el siguiente código de seguridad para confirmar tu acceso:</p>
+              <div style="background-color: #0E2041; border-radius: 8px; padding: 18px; text-align: center; margin: 25px 0;">
+                <span style="font-size: 34px; font-weight: bold; color: #d4af37; letter-spacing: 8px; font-family: monospace;">${verificationCode}</span>
+              </div>
+              <p style="color: #888888; font-size: 13px; text-align: center;">⏱️ Este código es válido durante <strong>10 minutos</strong> y es de un solo uso.</p>
+              <hr style="border: none; border-top: 1px solid #eeeeee; margin: 25px 0;" />
+              <p style="color: #e53e3e; font-size: 12px; text-align: center; margin-bottom: 0;">Si tú no intentaste iniciar sesión, te recomendamos cambiar tu contraseña de inmediato.</p>
+            </div>
+          </div>
+        `
       };
 
       try {
@@ -674,23 +690,31 @@ const resendVerificationCode = async (req, res) => {
       [encryptedCode, user.ID_USUARIO]
     );
 
-    const subject = is2FA ? "Código de Verificación 2FA" : "Código de Verificación - Registro";
-    const title = is2FA ? "Autenticación de Dos Pasos" : "Verifica tu cuenta";
+    const subject = is2FA ? "Nuevo Código de Verificación 2FA - GV-Security" : "Nuevo Código de Verificación - Registro GV-Security";
+    const title = is2FA ? "Autenticación en Dos Pasos (2FA)" : "Verifica tu correo electrónico";
     const desc = is2FA 
-      ? "Tu nuevo código de verificación de seguridad para acceder a tu cuenta es:" 
-      : `Hola <strong>${user.NOMBRE_USUARIO || 'Usuario'}</strong>,<br/>Usa el siguiente nuevo código para completar tu verificación:`;
+      ? "Tu nuevo código de seguridad para acceder a tu cuenta es:" 
+      : `Hola <strong>${user.NOMBRE_USUARIO || 'Usuario'}</strong>,<br/>Usa el siguiente nuevo código para completar la verificación de tu cuenta:`;
 
     const mailOptions = {
       from: `"GV-Security Support" <${process.env.EMAIL_USER}>`,
       to: user.EMAIL,
       subject: subject,
-      html: `<div style="font-family: sans-serif; border: 1px solid #ddd; padding: 25px; border-radius: 8px;">
-          <h2 style="color: #0E2041;">${title}</h2>
-          <p>${desc}</p>
-          <p style="font-size: 32px; font-weight: bold; color: #d4af37; letter-spacing: 5px; margin: 20px 0;">${newCode}</p>
-          <p style="color: #555; font-size: 14px;">⏱️ Este código es válido durante <strong>10 minutos</strong>.</p>
-          <p style="color: #888; font-size: 12px; margin-top: 20px;">Si no solicitaste este código, puedes ignorar este mensaje.</p>
-        </div>`
+      html: `
+        <div style="font-family: Arial, sans-serif; background-color: #f4f6f8; padding: 30px;">
+          <div style="max-width: 500px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; padding: 30px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-top: 5px solid #0E2041;">
+            <h2 style="color: #0E2041; margin-top: 0; font-size: 24px; text-align: center; font-weight: 800;">GV-Security</h2>
+            <h3 style="color: #333333; font-size: 18px; margin-bottom: 10px;">${title}</h3>
+            <p style="color: #555555; font-size: 14px; line-height: 1.6;">${desc}</p>
+            <div style="background-color: #0E2041; border-radius: 8px; padding: 18px; text-align: center; margin: 25px 0;">
+              <span style="font-size: 34px; font-weight: bold; color: #d4af37; letter-spacing: 8px; font-family: monospace;">${newCode}</span>
+            </div>
+            <p style="color: #888888; font-size: 13px; text-align: center;">⏱️ Este código es válido durante <strong>10 minutos</strong> y es de un solo uso.</p>
+            <hr style="border: none; border-top: 1px solid #eeeeee; margin: 25px 0;" />
+            <p style="color: #999999; font-size: 12px; text-align: center; margin-bottom: 0;">Si no solicitaste este código, puedes ignorar este mensaje de forma segura.</p>
+          </div>
+        </div>
+      `
     };
 
     try {
