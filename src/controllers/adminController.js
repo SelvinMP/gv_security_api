@@ -552,7 +552,15 @@ const getFormOptions = async (req, res) => {
     const [estadosReserva] = await connection.query('SELECT ID_ESTADO_RESERVA, DESCRIPCION FROM TBL_ESTADO_RESERVA ORDER BY ID_ESTADO_RESERVA ASC');
     const [tiposCondominio] = await connection.query('SELECT ID_TIPO_CONDOMINIO, DESCRIPCION FROM TBL_TIPO_CONDOMINIO ORDER BY ID_TIPO_CONDOMINIO ASC');
     const [instalaciones] = await connection.query('SELECT ID_INSTALACION, NOMBRE_INSTALACION, CAPACIDAD, PRECIO FROM TBL_INSTALACIONES ORDER BY ID_INSTALACION ASC');
-    const [condominios] = await connection.query('SELECT ID_CONDOMINIO, DESCRIPCION FROM TBL_CONDOMINIOS ORDER BY CAST(DESCRIPCION AS UNSIGNED) ASC, ID_CONDOMINIO ASC');
+    const [condominios] = await connection.query(`
+      SELECT 
+        c.ID_CONDOMINIO, 
+        c.DESCRIPCION, 
+        c.USUARIOS_POR_CASA,
+        (SELECT COUNT(*) FROM TBL_PERSONAS p WHERE p.ID_CONDOMINIO = c.ID_CONDOMINIO) AS RESIDENTES_ACTUALES
+      FROM TBL_CONDOMINIOS c 
+      ORDER BY CAST(c.DESCRIPCION AS UNSIGNED) ASC, c.ID_CONDOMINIO ASC
+    `);
     const [usuarios] = await connection.query('SELECT ID_USUARIO, NOMBRE_USUARIO, EMAIL FROM TBL_MS_USUARIO WHERE ID_ESTADO_USUARIO = 1 ORDER BY NOMBRE_USUARIO ASC');
     const [nacionalidades] = await connection.query('SELECT ID_NACIONALIDAD, NOMBRE_NACIONALIDAD FROM TBL_NACIONALIDADES ORDER BY ID_NACIONALIDAD ASC');
     const [parentescos] = await connection.query('SELECT ID_PARENTESCO, DESCRIPCION FROM TBL_PARENTESCOS ORDER BY ID_PARENTESCO ASC');
@@ -947,6 +955,31 @@ const createMaintenanceRecord = async (req, res) => {
           finalParentesco = ID_PARENTESCO ? Number(ID_PARENTESCO) : null;
 
           if (finalCondominio) {
+            // Validar capacidad máxima permitida del condominio (USUARIOS_POR_CASA)
+            const [condoInfo] = await connection.query(
+              'SELECT DESCRIPCION, USUARIOS_POR_CASA FROM TBL_CONDOMINIOS WHERE ID_CONDOMINIO = ?',
+              [finalCondominio]
+            );
+
+            if (condoInfo.length === 0) {
+              await connection.rollback();
+              return res.status(400).json({ success: false, message: 'El condominio seleccionado no existe.' });
+            }
+
+            const maxCapacidad = Number(condoInfo[0].USUARIOS_POR_CASA) || 4;
+            const [resCount] = await connection.query(
+              'SELECT COUNT(*) AS total FROM TBL_PERSONAS WHERE ID_CONDOMINIO = ?',
+              [finalCondominio]
+            );
+
+            if (resCount[0].total >= maxCapacidad) {
+              await connection.rollback();
+              return res.status(400).json({
+                success: false,
+                message: `El condominio ${condoInfo[0].DESCRIPCION} ha alcanzado su capacidad máxima permitida (${maxCapacidad} residentes). No es posible registrar más usuarios en esta vivienda.`
+              });
+            }
+
             // Verificar si este condominio ya tiene un ID_PADRE asignado (Administrador/Titular de la casa)
             const [padreExistente] = await connection.query(
               'SELECT ID_PERSONA, ID_USUARIO FROM TBL_PERSONAS WHERE ID_CONDOMINIO = ? AND ID_PADRE = 1',
@@ -1221,6 +1254,33 @@ const updateMaintenanceRecord = async (req, res) => {
           finalParentesco = ID_PARENTESCO !== undefined 
             ? (ID_PARENTESCO ? Number(ID_PARENTESCO) : null) 
             : (existingPersona[0]?.ID_PARENTESCO || null);
+
+          if (finalCondominio) {
+            // Validar capacidad máxima permitida del condominio (USUARIOS_POR_CASA) excluyendo al propio usuario si ya residía aquí
+            const [condoInfo] = await connection.query(
+              'SELECT DESCRIPCION, USUARIOS_POR_CASA FROM TBL_CONDOMINIOS WHERE ID_CONDOMINIO = ?',
+              [finalCondominio]
+            );
+
+            if (condoInfo.length === 0) {
+              await connection.rollback();
+              return res.status(400).json({ success: false, message: 'El condominio seleccionado no existe.' });
+            }
+
+            const maxCapacidad = Number(condoInfo[0].USUARIOS_POR_CASA) || 4;
+            const [resCount] = await connection.query(
+              'SELECT COUNT(*) AS total FROM TBL_PERSONAS WHERE ID_CONDOMINIO = ? AND ID_USUARIO != ?',
+              [finalCondominio, id]
+            );
+
+            if (resCount[0].total >= maxCapacidad) {
+              await connection.rollback();
+              return res.status(400).json({
+                success: false,
+                message: `El condominio ${condoInfo[0].DESCRIPCION} ha alcanzado su capacidad máxima permitida (${maxCapacidad} residentes). No es posible asignar más usuarios a esta vivienda.`
+              });
+            }
+          }
 
           if (ID_PADRE !== undefined) {
             const quiereSerPadre = (ID_PADRE === 1 || ID_PADRE === '1' || ID_PADRE === true);

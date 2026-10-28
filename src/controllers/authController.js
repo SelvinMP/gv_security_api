@@ -320,7 +320,15 @@ const getCondos = async (req, res) => {
   let connection;
   try {
     connection = await mysqlPool.getConnection();
-    const [results] = await connection.query("SELECT ID_CONDOMINIO, DESCRIPCION FROM TBL_CONDOMINIOS");
+    const [results] = await connection.query(`
+      SELECT 
+        c.ID_CONDOMINIO, 
+        c.DESCRIPCION,
+        c.USUARIOS_POR_CASA,
+        (SELECT COUNT(*) FROM TBL_PERSONAS p WHERE p.ID_CONDOMINIO = c.ID_CONDOMINIO) AS RESIDENTES_ACTUALES
+      FROM TBL_CONDOMINIOS c
+      ORDER BY CAST(c.DESCRIPCION AS UNSIGNED) ASC, c.ID_CONDOMINIO ASC
+    `);
     res.json(results);
   } catch (err) {
     res.status(500).json({ error: "Error al obtener condominios" });
@@ -330,24 +338,22 @@ const getCondos = async (req, res) => {
 };
 
 const savePersonalData = async (req, res) => {
-  const { 
-    id_usuario, 
-    dni, 
-    carnet, 
-    nationality, 
-    contactType, 
-    contact, 
-    relationship, 
-    condo 
-  } = req.body;
+  const id_usuario = req.body.id_usuario || req.body.usuarioId || req.body.ID_USUARIO;
+  const dni = req.body.dni || req.body.P_DNI || req.body.DNI_PERSONA;
+  const carnet = req.body.carnet || req.body.P_NUM_CARNET_EXTRANJERO || req.body.NUM_CARNET_EXTRANJERO;
+  const nationality = req.body.nationality || req.body.P_ID_NACIONALIDAD || req.body.ID_NACIONALIDAD;
+  const contactType = req.body.contactType || req.body.P_TIPO_CONTACTO || req.body.ID_TIPO_CONTACTO;
+  const contact = req.body.contact || req.body.P_CONTACTO || req.body.CONTACTO;
+  const relationship = req.body.relationship || req.body.P_PARENTESCO || req.body.ID_PARENTESCO;
+  const condo = req.body.condo || req.body.P_CONDOMINIO || req.body.ID_CONDOMINIO || req.body.id_condominio;
 
   if (!id_usuario || !nationality || !contactType || !contact || !relationship || !condo) {
-    return res.status(400).json({ message: "Datos incompletos" });
+    return res.status(400).json({ success: false, error: "Datos incompletos", message: "Todos los campos de datos personales son requeridos" });
   }
 
-  const esHondurena = nationality.toLowerCase().includes("hondureña");
-  if (esHondurena && !dni) return res.status(400).json({ message: "El DNI es requerido para nacionalidad hondureña" });
-  if (!esHondurena && !carnet) return res.status(400).json({ message: "El Carnet es requerido para extranjeros" });
+  const esHondurena = String(nationality).toLowerCase().includes("hondureña") || String(nationality) === "1";
+  if (esHondurena && !dni) return res.status(400).json({ success: false, error: "El DNI es requerido para nacionalidad hondureña", message: "El DNI es requerido para nacionalidad hondureña" });
+  if (!esHondurena && !carnet) return res.status(400).json({ success: false, error: "El Carnet es requerido para extranjeros", message: "El Carnet es requerido para extranjeros" });
 
   let connection;
   try {
@@ -356,44 +362,89 @@ const savePersonalData = async (req, res) => {
 
     // 1. Validar DNI si es hondureño
     if (esHondurena && dni) {
-      if (dni.length < 4) return res.status(400).json({ message: "El DNI debe tener al menos 4 dígitos" });
-      const codigoDNI = dni.substring(0, 4);
+      const cleanDni = String(dni).replace(/\D/g, '');
+      if (cleanDni.length < 4) {
+        await connection.rollback();
+        return res.status(400).json({ success: false, error: "El DNI debe tener al menos 4 dígitos", message: "El DNI debe tener al menos 4 dígitos" });
+      }
+      const codigoDNI = cleanDni.substring(0, 4);
       const [codigoResults] = await connection.query("SELECT COUNT(*) as count FROM TBL_CODIGO_DNI WHERE CODIGO = ?", [codigoDNI]);
-      if (codigoResults[0].count === 0) return res.status(400).json({ message: "Código de DNI inválido" });
+      if (codigoResults[0].count === 0) {
+        await connection.rollback();
+        return res.status(400).json({ success: false, error: "Código de DNI inválido", message: "Código de DNI inválido" });
+      }
     }
 
     // 2. Obtener IDs y validar capacidad del condominio
-    const [condoResults] = await connection.query("SELECT ID_CONDOMINIO, USUARIOS_POR_CASA FROM TBL_CONDOMINIOS WHERE DESCRIPCION = ?", [condo]);
-    if (condoResults.length === 0) throw new Error("Condominio no encontrado");
-    const { ID_CONDOMINIO, USUARIOS_POR_CASA } = condoResults[0];
+    const [condoResults] = await connection.query(
+      "SELECT ID_CONDOMINIO, DESCRIPCION, USUARIOS_POR_CASA FROM TBL_CONDOMINIOS WHERE ID_CONDOMINIO = ? OR DESCRIPCION = ? LIMIT 1",
+      [condo, String(condo)]
+    );
+    if (condoResults.length === 0) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, error: "Condominio no encontrado", message: "Condominio no encontrado" });
+    }
+    const { ID_CONDOMINIO, DESCRIPCION: nombreCondo, USUARIOS_POR_CASA } = condoResults[0];
+    const maxPermitidos = Number(USUARIOS_POR_CASA) || 4;
 
-    const [regCount] = await connection.query("SELECT COUNT(*) AS total FROM TBL_PERSONAS WHERE ID_CONDOMINIO = ?", [ID_CONDOMINIO]);
-    if (regCount[0].total >= USUARIOS_POR_CASA) return res.status(400).json({ message: "Capacidad máxima del condominio alcanzada" });
+    const [regCount] = await connection.query(
+      "SELECT COUNT(*) AS total FROM TBL_PERSONAS WHERE ID_CONDOMINIO = ? AND ID_USUARIO != ?",
+      [ID_CONDOMINIO, id_usuario]
+    );
+
+    if (regCount[0].total >= maxPermitidos) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        error: `El condominio ${nombreCondo} ha alcanzado su capacidad máxima permitida (${maxPermitidos} residentes). No es posible asignar más usuarios a esta vivienda.`,
+        message: `El condominio ${nombreCondo} ha alcanzado su capacidad máxima permitida (${maxPermitidos} residentes). No es posible asignar más usuarios a esta vivienda.`
+      });
+    }
 
     // 3. Obtener Usuario y Persona
     const [userRows] = await connection.query("SELECT NOMBRE_USUARIO FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?", [id_usuario]);
-    if (userRows.length === 0) throw new Error("Usuario no encontrado");
+    if (userRows.length === 0) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, error: "Usuario no encontrado", message: "Usuario no encontrado" });
+    }
 
     const [personaRows] = await connection.query("SELECT ID_PERSONA FROM TBL_PERSONAS WHERE ID_USUARIO = ?", [id_usuario]);
-    if (personaRows.length === 0) throw new Error("Registro de persona no encontrado");
-    const ID_PERSONA = personaRows[0].ID_PERSONA;
+    let ID_PERSONA;
+    if (personaRows.length === 0) {
+      const [insertP] = await connection.query("INSERT INTO TBL_PERSONAS (ID_USUARIO) VALUES (?)", [id_usuario]);
+      ID_PERSONA = insertP.insertId;
+    } else {
+      ID_PERSONA = personaRows[0].ID_PERSONA;
+    }
 
-    // 4. Obtener otros IDs
-    const [nacionalidadRows] = await connection.query("SELECT ID_NACIONALIDAD FROM TBL_NACIONALIDADES WHERE NOMBRE_NACIONALIDAD = ?", [nationality]);
-    const ID_NACIONALIDAD = nacionalidadRows.length > 0 ? nacionalidadRows[0].ID_NACIONALIDAD : null;
+    // 4. Obtener otros IDs (soportando nombres o IDs numéricos)
+    let ID_NACIONALIDAD = Number(nationality) || null;
+    if (!ID_NACIONALIDAD) {
+      const [nacionalidadRows] = await connection.query("SELECT ID_NACIONALIDAD FROM TBL_NACIONALIDADES WHERE NOMBRE_NACIONALIDAD = ?", [nationality]);
+      ID_NACIONALIDAD = nacionalidadRows.length > 0 ? nacionalidadRows[0].ID_NACIONALIDAD : 1;
+    }
 
-    const [tipoContRows] = await connection.query("SELECT ID_TIPO_CONTACTO FROM TBL_TIPO_CONTACTO WHERE DESCRIPCION = ?", [contactType]);
-    const ID_TIPO_CONTACTO = tipoContRows.length > 0 ? tipoContRows[0].ID_TIPO_CONTACTO : null;
+    let ID_TIPO_CONTACTO = Number(contactType) || null;
+    if (!ID_TIPO_CONTACTO) {
+      const [tipoContRows] = await connection.query("SELECT ID_TIPO_CONTACTO FROM TBL_TIPO_CONTACTO WHERE DESCRIPCION = ?", [contactType]);
+      ID_TIPO_CONTACTO = tipoContRows.length > 0 ? tipoContRows[0].ID_TIPO_CONTACTO : 1;
+    }
 
-    const [parentescoRows] = await connection.query("SELECT ID_PARENTESCO FROM TBL_PARENTESCOS WHERE DESCRIPCION = ?", [relationship]);
-    const ID_PARENTESCO = parentescoRows.length > 0 ? parentescoRows[0].ID_PARENTESCO : null;
+    let ID_PARENTESCO = Number(relationship) || null;
+    if (!ID_PARENTESCO) {
+      const [parentescoRows] = await connection.query("SELECT ID_PARENTESCO FROM TBL_PARENTESCOS WHERE DESCRIPCION = ?", [relationship]);
+      ID_PARENTESCO = parentescoRows.length > 0 ? parentescoRows[0].ID_PARENTESCO : 9;
+    }
 
     // 5. Insertar Contacto
-    const [contResult] = await connection.query("INSERT INTO TBL_CONTACTOS (ID_TIPO_CONTACTO, DESCRIPCION) VALUES (?, ?)", [ID_TIPO_CONTACTO, contact]);
+    const [contResult] = await connection.query(
+      "INSERT INTO TBL_CONTACTOS (ID_TIPO_CONTACTO, DESCRIPCION) VALUES (?, ?)", 
+      [ID_TIPO_CONTACTO, String(contact).trim().toUpperCase()]
+    );
     const ID_CONTACTO = contResult.insertId;
 
     // 6. Verificar si es necesario administrador de la vivienda
-    const [adminCheck] = await connection.query("SELECT COUNT(*) AS count FROM TBL_PERSONAS WHERE ID_CONDOMINIO = ? AND ID_PADRE = 1", [ID_CONDOMINIO]);
+    const [adminCheck] = await connection.query("SELECT COUNT(*) AS count FROM TBL_PERSONAS WHERE ID_CONDOMINIO = ? AND ID_PADRE = 1 AND ID_USUARIO != ?", [ID_CONDOMINIO, id_usuario]);
     const isAdminRequired = adminCheck[0].count === 0;
 
     // 7. Actualizar Persona
@@ -401,22 +452,31 @@ const savePersonalData = async (req, res) => {
       UPDATE TBL_PERSONAS 
       SET DNI_PERSONA = ?, NUM_CARNET_EXTRANJERO = ?, ID_NACIONALIDAD = ?, ID_CONTACTO = ?, ID_ESTADO_PERSONA = 1, ID_PARENTESCO = ?, ID_CONDOMINIO = ?, ID_PADRE = ?
       WHERE ID_PERSONA = ?`;
-    await connection.query(updateQuery, [dni || null, carnet || null, ID_NACIONALIDAD, ID_CONTACTO, ID_PARENTESCO, ID_CONDOMINIO, isAdminRequired ? 1 : null, ID_PERSONA]);
+    await connection.query(updateQuery, [
+      dni ? String(dni).trim().toUpperCase() : null, 
+      carnet ? String(carnet).trim().toUpperCase() : null, 
+      ID_NACIONALIDAD, 
+      ID_CONTACTO, 
+      ID_PARENTESCO, 
+      ID_CONDOMINIO, 
+      isAdminRequired ? 1 : null, 
+      ID_PERSONA
+    ]);
 
     // 8. Actualizar Usuario
     await connection.query("UPDATE TBL_MS_USUARIO SET ID_ESTADO_USUARIO = 4, PRIMER_INGRESO_COMPLETADO = 1 WHERE ID_USUARIO = ?", [id_usuario]);
 
     await connection.commit();
 
-    // 9. Notificar Administradores (Awaiting for better reliability on Render)
-    await notifyAdmins(userRows[0].NOMBRE_USUARIO, contact, condo, isAdminRequired, ID_CONDOMINIO, esHondurena, dni, carnet);
+    // 9. Notificar Administradores (sin bloquear)
+    notifyAdmins(userRows[0].NOMBRE_USUARIO, contact, nombreCondo, isAdminRequired, ID_CONDOMINIO, esHondurena, dni, carnet).catch(e => console.error("Error notifyAdmins:", e));
 
     res.status(200).json({ success: true, message: "Datos guardados correctamente" });
 
   } catch (err) {
     if (connection) await connection.rollback();
     console.error("Error en savePersonalData:", err);
-    res.status(500).json({ message: "Error interno" });
+    res.status(500).json({ success: false, error: "Error interno", message: "Error interno" });
   } finally {
     if (connection) connection.release();
   }
@@ -683,17 +743,54 @@ const getPendingUsers = async (req, res) => {
 // Approve user access
 const approveUser = async (req, res) => {
   const { targetUsuarioId } = req.params;
+  let connection;
   try {
-    const connection = await mysqlPool.getConnection();
+    connection = await mysqlPool.getConnection();
+    await connection.beginTransaction();
+
+    // Obtener condominio del usuario a aprobar
+    const [userCondo] = await connection.query(`
+      SELECT p.ID_CONDOMINIO, c.DESCRIPCION, c.USUARIOS_POR_CASA
+      FROM TBL_PERSONAS p
+      JOIN TBL_CONDOMINIOS c ON p.ID_CONDOMINIO = c.ID_CONDOMINIO
+      WHERE p.ID_USUARIO = ?
+    `, [targetUsuarioId]);
+
+    if (userCondo.length > 0 && userCondo[0].ID_CONDOMINIO) {
+      const { ID_CONDOMINIO, DESCRIPCION: nombreCondo, USUARIOS_POR_CASA } = userCondo[0];
+      const maxCapacidad = Number(USUARIOS_POR_CASA) || 4;
+
+      // Contar usuarios ya activos en ese condominio excluyendo al que se va a aprobar
+      const [activeCount] = await connection.query(`
+        SELECT COUNT(*) AS total
+        FROM TBL_PERSONAS p
+        JOIN TBL_MS_USUARIO u ON p.ID_USUARIO = u.ID_USUARIO
+        WHERE p.ID_CONDOMINIO = ? AND u.ID_ESTADO_USUARIO = 1 AND p.ID_USUARIO != ?
+      `, [ID_CONDOMINIO, targetUsuarioId]);
+
+      if (activeCount[0].total >= maxCapacidad) {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          error: `El condominio ${nombreCondo} ya cuenta con el número máximo permitido de residentes activos (${maxCapacidad}). No se puede aprobar otro usuario.`,
+          message: `El condominio ${nombreCondo} ya cuenta con el número máximo permitido de residentes activos (${maxCapacidad}). No se puede aprobar otro usuario.`
+        });
+      }
+    }
+
     await connection.query(
       'UPDATE TBL_MS_USUARIO SET ID_ESTADO_USUARIO = 1 WHERE ID_USUARIO = ?',
       [targetUsuarioId]
     );
-    connection.release();
-    res.json({ message: 'Usuario aprobado con éxito' });
+
+    await connection.commit();
+    res.json({ success: true, message: 'Usuario aprobado con éxito' });
   } catch (error) {
+    if (connection) await connection.rollback();
     console.error('Error in approveUser:', error);
-    res.status(500).json({ message: 'Error al aprobar usuario' });
+    res.status(500).json({ success: false, error: 'Error al aprobar usuario', message: 'Error al aprobar usuario' });
+  } finally {
+    if (connection) connection.release();
   }
 };
 

@@ -19,6 +19,14 @@ router.get('/nationalities', authController.getNationalities);
 router.get('/contact-types', authController.getContactTypes);
 router.get('/relationships', authController.getRelationships);
 router.get('/condos', authController.getCondos);
+
+// Aliases para compatibilidad con aplicación móvil (Flutter)
+router.post('/nueva_persona', authController.savePersonalData);
+router.get('/condominio', authController.getCondos);
+router.get('/parentesco', authController.getRelationships);
+router.get('/nacionalidad', authController.getNationalities);
+router.get('/contacto', authController.getContactTypes);
+router.get('/personas', authController.getCondos);
 router.post('/save-fcm-token', authController.saveFCMToken);
 router.get('/push-status/:usuarioId', authController.getPushStatus);
 router.post('/set-push-status', authController.setPushStatus);

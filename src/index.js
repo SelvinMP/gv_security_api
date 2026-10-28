@@ -51,6 +51,8 @@ app.use('/api/visitantes', visitorRoutes);
 app.use('/api/guardia', guardiaRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api', notificationRoutes);
+// Compatibilidad directa para llamadas móviles sin prefijo /api/auth
+app.use('/', authRoutes);
 console.log('Rutas registradas exitosamente');
 
 app.get('/', (req, res) => {
