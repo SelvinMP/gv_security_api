@@ -780,24 +780,120 @@ const verificarCodigoRecuperacion = async (req, res) => {
   }
 };
 
+// Helper de validación de seguridad para contraseñas
+const validatePasswordSecurity = (password, userDetails = {}) => {
+  if (!password || typeof password !== 'string') {
+    return 'La contraseña es obligatoria.';
+  }
+  if (password.length < 8) {
+    return 'La contraseña debe tener al menos 8 caracteres.';
+  }
+  if (password.length > 30) {
+    return 'La contraseña no puede exceder los 30 caracteres.';
+  }
+  if (!/[A-Z]/.test(password)) {
+    return 'La contraseña debe incluir al menos una letra mayúscula (A-Z).';
+  }
+  if (!/[a-z]/.test(password)) {
+    return 'La contraseña debe incluir al menos una letra minúscula (a-z).';
+  }
+  if (!/[0-9]/.test(password)) {
+    return 'La contraseña debe incluir al menos un número (0-9).';
+  }
+  if (!/[^A-Za-z0-9]/.test(password)) {
+    return 'La contraseña debe incluir al menos un carácter especial (ej. !@#$%^&*).';
+  }
+  if (/\s/.test(password)) {
+    return 'La contraseña no debe contener espacios en blanco.';
+  }
+
+  if (userDetails.NOMBRE_USUARIO) {
+    const parts = userDetails.NOMBRE_USUARIO.toLowerCase().split(/\s+/).filter(p => p.length >= 4);
+    for (const part of parts) {
+      if (password.toLowerCase().includes(part)) {
+        return 'Por seguridad, la contraseña no debe contener tu nombre de usuario.';
+      }
+    }
+  }
+
+  if (userDetails.EMAIL) {
+    const emailPrefix = userDetails.EMAIL.split('@')[0].toLowerCase();
+    if (emailPrefix.length >= 4 && password.toLowerCase().includes(emailPrefix)) {
+      return 'Por seguridad, la contraseña no debe contener partes de tu correo electrónico.';
+    }
+  }
+
+  return null;
+};
+
 const actualizarContrasena = async (req, res) => {
   const { id_usuario, nuevaContrasena } = req.body;
-  if (!id_usuario || !nuevaContrasena) return res.status(400).json({ message: "Datos incompletos" });
+  if (!id_usuario || !nuevaContrasena) return res.status(400).json({ success: false, message: "Datos incompletos" });
 
   let connection;
   try {
     connection = await mysqlPool.getConnection();
-    const hashedPassword = await bcrypt.hash(nuevaContrasena, 8);
+
+    const [rows] = await connection.query(
+      "SELECT ID_USUARIO, NOMBRE_USUARIO, EMAIL, CONTRASEÑA FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?", 
+      [id_usuario]
+    );
+    if (rows.length === 0) return res.status(404).json({ success: false, message: "Usuario no encontrado" });
+
+    const user = rows[0];
+
+    const securityError = validatePasswordSecurity(nuevaContrasena, {
+      NOMBRE_USUARIO: user.NOMBRE_USUARIO,
+      EMAIL: user.EMAIL
+    });
+    if (securityError) {
+      return res.status(400).json({ success: false, message: securityError });
+    }
+
+    if (user.CONTRASEÑA) {
+      const isSameAsCurrent = await bcrypt.compare(nuevaContrasena, user.CONTRASEÑA);
+      if (isSameAsCurrent) {
+        return res.status(400).json({ success: false, message: "No puedes reutilizar tu contraseña anterior." });
+      }
+    }
+
+    const [historyRows] = await connection.query(
+      "SELECT ID_HIST, CONTRASEÑA FROM TBL_MS_HIST_CONTRASEÑA WHERE ID_USUARIO = ? ORDER BY ID_HIST DESC",
+      [id_usuario]
+    );
+
+    for (const hist of historyRows) {
+      const isReused = await bcrypt.compare(nuevaContrasena, hist.CONTRASEÑA);
+      if (isReused) {
+        return res.status(400).json({ 
+          success: false, 
+          message: "No puedes reutilizar una contraseña usada anteriormente." 
+        });
+      }
+    }
+
+    await connection.beginTransaction();
+
+    if (user.CONTRASEÑA) {
+      await connection.query(
+        "INSERT INTO TBL_MS_HIST_CONTRASEÑA (ID_USUARIO, CONTRASEÑA) VALUES (?, ?)",
+        [id_usuario, user.CONTRASEÑA]
+      );
+    }
+
+    const hashedPassword = await bcrypt.hash(nuevaContrasena, 10);
     
     await connection.query(
       "UPDATE TBL_MS_USUARIO SET CONTRASEÑA = ?, CODIGO_VERIFICACION = NULL, INTENTOS_FALLIDOS = 0 WHERE ID_USUARIO = ?", 
       [hashedPassword, id_usuario]
     );
 
+    await connection.commit();
     res.json({ success: true, message: "Contraseña actualizada exitosamente" });
   } catch (error) {
+    if (connection) await connection.rollback();
     console.error("Error in actualizarContrasena:", error);
-    res.status(500).json({ message: "Error al actualizar la contraseña" });
+    res.status(500).json({ success: false, message: "Error al actualizar la contraseña" });
   } finally {
     if (connection) connection.release();
   }
@@ -805,29 +901,154 @@ const actualizarContrasena = async (req, res) => {
 
 const changePassword = async (req, res) => {
   const { id_usuario, currentPassword, newPassword } = req.body;
+
   if (!id_usuario || !currentPassword || !newPassword) {
-    return res.status(400).json({ message: "Todos los campos son requeridos" });
+    return res.status(400).json({ success: false, message: "Todos los campos son requeridos." });
+  }
+
+  if (currentPassword === newPassword) {
+    return res.status(400).json({ 
+      success: false, 
+      message: "La nueva contraseña no puede ser igual a la contraseña actual." 
+    });
   }
 
   let connection;
   try {
     connection = await mysqlPool.getConnection();
-    const [rows] = await connection.query("SELECT CONTRASEÑA FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?", [id_usuario]);
-    if (rows.length === 0) return res.status(404).json({ message: "Usuario no encontrado" });
 
-    const user = rows[0];
-    const passwordIsValid = await bcrypt.compare(currentPassword, user.CONTRASEÑA);
-    if (!passwordIsValid) {
-      return res.status(401).json({ message: "La contraseña actual es incorrecta" });
+    // 1. Obtener datos del usuario
+    const [rows] = await connection.query(
+      "SELECT ID_USUARIO, NOMBRE_USUARIO, EMAIL, CONTRASEÑA, ID_ESTADO_USUARIO FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?", 
+      [id_usuario]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Usuario no encontrado" });
     }
 
-    const hashedNewPassword = await bcrypt.hash(newPassword, 8);
-    await connection.query("UPDATE TBL_MS_USUARIO SET CONTRASEÑA = ? WHERE ID_USUARIO = ?", [hashedNewPassword, id_usuario]);
+    const user = rows[0];
 
-    res.json({ success: true, message: "Contraseña cambiada correctamente" });
+    if (user.ID_ESTADO_USUARIO === 3) {
+      return res.status(403).json({ success: false, message: "Tu usuario se encuentra bloqueado. Contacta al administrador." });
+    }
+
+    // 2. Validar contraseña actual con bcrypt
+    const passwordIsValid = await bcrypt.compare(currentPassword, user.CONTRASEÑA);
+    if (!passwordIsValid) {
+      return res.status(401).json({ success: false, message: "La contraseña actual es incorrecta." });
+    }
+
+    // 3. Validaciones de seguridad y complejidad
+    const securityError = validatePasswordSecurity(newPassword, {
+      NOMBRE_USUARIO: user.NOMBRE_USUARIO,
+      EMAIL: user.EMAIL
+    });
+    if (securityError) {
+      return res.status(400).json({ success: false, message: securityError });
+    }
+
+    // 4. Validar que la nueva contraseña no coincida con el hash de la contraseña actual
+    const isSameAsCurrent = await bcrypt.compare(newPassword, user.CONTRASEÑA);
+    if (isSameAsCurrent) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "No puedes reutilizar tu contraseña actual. Por favor ingresa una diferente." 
+      });
+    }
+
+    // 5. Validar que no se haya usado en el historial (TBL_MS_HIST_CONTRASEÑA)
+    const [historyRows] = await connection.query(
+      "SELECT ID_HIST, CONTRASEÑA FROM TBL_MS_HIST_CONTRASEÑA WHERE ID_USUARIO = ? ORDER BY ID_HIST DESC",
+      [id_usuario]
+    );
+
+    for (const hist of historyRows) {
+      const isReused = await bcrypt.compare(newPassword, hist.CONTRASEÑA);
+      if (isReused) {
+        return res.status(400).json({ 
+          success: false, 
+          message: "No puedes reutilizar una contraseña usada anteriormente. Por motivos de seguridad, elige una contraseña diferente." 
+        });
+      }
+    }
+
+    // 6. Iniciar transacción para actualizar y registrar historial
+    await connection.beginTransaction();
+
+    // Guardar la contraseña anterior en el historial
+    await connection.query(
+      "INSERT INTO TBL_MS_HIST_CONTRASEÑA (ID_USUARIO, CONTRASEÑA) VALUES (?, ?)",
+      [id_usuario, user.CONTRASEÑA]
+    );
+
+    // Mantener un historial máximo de 5 contraseñas anteriores
+    const [allHistory] = await connection.query(
+      "SELECT ID_HIST, CONTRASEÑA FROM TBL_MS_HIST_CONTRASEÑA WHERE ID_USUARIO = ? ORDER BY ID_HIST DESC",
+      [id_usuario]
+    );
+
+    const MAX_HISTORIAL = 5;
+    if (allHistory.length > MAX_HISTORIAL) {
+      const toRemove = allHistory.slice(MAX_HISTORIAL);
+      const ip = req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'Desconocida';
+      const userAgent = req.headers['user-agent'] || 'Desconocido';
+
+      for (const oldItem of toRemove) {
+        try {
+          await connection.query(
+            `INSERT INTO TBL_LOG_HISTORIAL_CONTRASEÑA 
+             (ID_HIST, ID_USUARIO, CONTRASEÑA, FECHA_ELIMINACION, USUARIO_ELIMINACION, ORIGEN_IP, NAVEGADOR)
+             VALUES (?, ?, ?, NOW(), ?, ?, ?)`,
+            [
+              oldItem.ID_HIST,
+              id_usuario,
+              oldItem.CONTRASEÑA,
+              user.NOMBRE_USUARIO || 'Sistema',
+              String(ip).slice(0, 45),
+              String(userAgent).slice(0, 255)
+            ]
+          );
+        } catch (logErr) {
+          console.warn("Advertencia al registrar log de historial:", logErr.message);
+        }
+
+        await connection.query("DELETE FROM TBL_MS_HIST_CONTRASEÑA WHERE ID_HIST = ?", [oldItem.ID_HIST]);
+      }
+    }
+
+    // Obtener días de vencimiento de los parámetros del sistema
+    const [paramRows] = await connection.query(
+      "SELECT VALOR FROM TBL_MS_PARAMETROS WHERE PARAMETRO = 'FECHA_VENCIMIENTO'"
+    );
+    const diasVencimiento = (paramRows.length > 0 && !isNaN(parseInt(paramRows[0].VALOR, 10))) 
+      ? parseInt(paramRows[0].VALOR, 10) 
+      : 90;
+
+    // Hashear la nueva contraseña
+    const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+
+    // Actualizar usuario
+    await connection.query(
+      `UPDATE TBL_MS_USUARIO 
+       SET CONTRASEÑA = ?, 
+           FECHA_VENCIMIENTO = DATE_ADD(NOW(), INTERVAL ? DAY), 
+           INTENTOS_FALLIDOS = 0 
+       WHERE ID_USUARIO = ?`,
+      [hashedNewPassword, diasVencimiento, id_usuario]
+    );
+
+    await connection.commit();
+
+    return res.status(200).json({ 
+      success: true, 
+      message: "¡Contraseña actualizada exitosamente!" 
+    });
+
   } catch (error) {
+    if (connection) await connection.rollback();
     console.error("Error in changePassword:", error);
-    res.status(500).json({ message: "Error interno del servidor" });
+    return res.status(500).json({ success: false, message: "Error interno del servidor al actualizar la contraseña." });
   } finally {
     if (connection) connection.release();
   }

@@ -22,5 +22,9 @@ router.get('/condos', authController.getCondos);
 router.post('/save-fcm-token', authController.saveFCMToken);
 router.get('/push-status/:usuarioId', authController.getPushStatus);
 router.post('/set-push-status', authController.setPushStatus);
+router.post('/change-password', authController.changePassword);
+router.post('/forgot-password', authController.enviarCodigoRecuperacion);
+router.post('/verify-reset-code', authController.verificarCodigoRecuperacion);
+router.post('/reset-password', authController.actualizarContrasena);
 
 module.exports = router;
