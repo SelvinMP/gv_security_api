@@ -272,8 +272,20 @@ const getDashboardStats = async (req, res) => {
       SELECT 
         COUNT(*) AS total_condominios,
         COALESCE(SUM(USUARIOS_POR_CASA), 0) AS total_capacidad_usuarios,
-        (SELECT COUNT(DISTINCT ID_CONDOMINIO) FROM TBL_PERSONAS WHERE ID_CONDOMINIO IS NOT NULL) AS condominios_ocupados,
-        (SELECT COUNT(*) FROM TBL_PERSONAS WHERE ID_CONDOMINIO IS NOT NULL) AS residentes_asignados
+        (SELECT COUNT(DISTINCT p.ID_CONDOMINIO) 
+         FROM TBL_PERSONAS p 
+         LEFT JOIN TBL_MS_USUARIO u ON p.ID_USUARIO = u.ID_USUARIO
+         WHERE p.ID_CONDOMINIO IS NOT NULL 
+           AND (u.ID_ESTADO_USUARIO IS NULL OR u.ID_ESTADO_USUARIO != 2)
+           AND (p.ID_ESTADO_PERSONA IS NULL OR p.ID_ESTADO_PERSONA != 2)
+        ) AS condominios_ocupados,
+        (SELECT COUNT(*) 
+         FROM TBL_PERSONAS p 
+         LEFT JOIN TBL_MS_USUARIO u ON p.ID_USUARIO = u.ID_USUARIO
+         WHERE p.ID_CONDOMINIO IS NOT NULL 
+           AND (u.ID_ESTADO_USUARIO IS NULL OR u.ID_ESTADO_USUARIO != 2)
+           AND (p.ID_ESTADO_PERSONA IS NULL OR p.ID_ESTADO_PERSONA != 2)
+        ) AS residentes_asignados
       FROM TBL_CONDOMINIOS;
     `);
 
@@ -557,7 +569,13 @@ const getFormOptions = async (req, res) => {
         c.ID_CONDOMINIO, 
         c.DESCRIPCION, 
         c.USUARIOS_POR_CASA,
-        (SELECT COUNT(*) FROM TBL_PERSONAS p WHERE p.ID_CONDOMINIO = c.ID_CONDOMINIO) AS RESIDENTES_ACTUALES
+        (SELECT COUNT(*) 
+         FROM TBL_PERSONAS p
+         LEFT JOIN TBL_MS_USUARIO u ON p.ID_USUARIO = u.ID_USUARIO
+         WHERE p.ID_CONDOMINIO = c.ID_CONDOMINIO
+           AND (u.ID_ESTADO_USUARIO IS NULL OR u.ID_ESTADO_USUARIO != 2)
+           AND (p.ID_ESTADO_PERSONA IS NULL OR p.ID_ESTADO_PERSONA != 2)
+        ) AS RESIDENTES_ACTUALES
       FROM TBL_CONDOMINIOS c 
       ORDER BY CAST(c.DESCRIPCION AS UNSIGNED) ASC, c.ID_CONDOMINIO ASC
     `);
@@ -670,8 +688,14 @@ const getMaintenanceTable = async (req, res) => {
             c.DESCRIPCION AS NUM_CASA,
             c.ID_TIPO_CONDOMINIO,
             tc.DESCRIPCION AS TIPO_CONDOMINIO,
-            c.USUARIOS_POR_CASA,
-            (SELECT COUNT(*) FROM TBL_PERSONAS p WHERE p.ID_CONDOMINIO = c.ID_CONDOMINIO) AS RESIDENTES_ACTUALES
+            COALESCE(c.USUARIOS_POR_CASA, 4) AS USUARIOS_POR_CASA,
+            (SELECT COUNT(*) 
+             FROM TBL_PERSONAS p
+             LEFT JOIN TBL_MS_USUARIO u ON p.ID_USUARIO = u.ID_USUARIO
+             WHERE p.ID_CONDOMINIO = c.ID_CONDOMINIO
+               AND (u.ID_ESTADO_USUARIO IS NULL OR u.ID_ESTADO_USUARIO != 2)
+               AND (p.ID_ESTADO_PERSONA IS NULL OR p.ID_ESTADO_PERSONA != 2)
+            ) AS RESIDENTES_ACTUALES
           FROM TBL_CONDOMINIOS c
           LEFT JOIN TBL_TIPO_CONDOMINIO tc ON c.ID_TIPO_CONDOMINIO = tc.ID_TIPO_CONDOMINIO
           ORDER BY CAST(c.DESCRIPCION AS UNSIGNED) ASC, c.ID_CONDOMINIO ASC;
@@ -957,8 +981,8 @@ const createMaintenanceRecord = async (req, res) => {
           if (finalCondominio) {
             // Validar capacidad máxima permitida del condominio (USUARIOS_POR_CASA)
             const [condoInfo] = await connection.query(
-              'SELECT DESCRIPCION, USUARIOS_POR_CASA FROM TBL_CONDOMINIOS WHERE ID_CONDOMINIO = ?',
-              [finalCondominio]
+              'SELECT ID_CONDOMINIO, DESCRIPCION, USUARIOS_POR_CASA FROM TBL_CONDOMINIOS WHERE ID_CONDOMINIO = ? OR DESCRIPCION = ? LIMIT 1',
+              [finalCondominio, String(finalCondominio)]
             );
 
             if (condoInfo.length === 0) {
@@ -966,9 +990,15 @@ const createMaintenanceRecord = async (req, res) => {
               return res.status(400).json({ success: false, message: 'El condominio seleccionado no existe.' });
             }
 
+            finalCondominio = condoInfo[0].ID_CONDOMINIO;
             const maxCapacidad = Number(condoInfo[0].USUARIOS_POR_CASA) || 4;
             const [resCount] = await connection.query(
-              'SELECT COUNT(*) AS total FROM TBL_PERSONAS WHERE ID_CONDOMINIO = ?',
+              `SELECT COUNT(*) AS total 
+               FROM TBL_PERSONAS p
+               LEFT JOIN TBL_MS_USUARIO u ON p.ID_USUARIO = u.ID_USUARIO
+               WHERE p.ID_CONDOMINIO = ?
+                 AND (u.ID_ESTADO_USUARIO IS NULL OR u.ID_ESTADO_USUARIO != 2)
+                 AND (p.ID_ESTADO_PERSONA IS NULL OR p.ID_ESTADO_PERSONA != 2)`,
               [finalCondominio]
             );
 
@@ -976,7 +1006,7 @@ const createMaintenanceRecord = async (req, res) => {
               await connection.rollback();
               return res.status(400).json({
                 success: false,
-                message: `El condominio ${condoInfo[0].DESCRIPCION} ha alcanzado su capacidad máxima permitida (${maxCapacidad} residentes). No es posible registrar más usuarios en esta vivienda.`
+                message: `El condominio ${condoInfo[0].DESCRIPCION} ha alcanzado su capacidad máxima permitida (${maxCapacidad} usuarios/residentes). No es posible registrar más usuarios en esta vivienda.`
               });
             }
 
@@ -1084,17 +1114,18 @@ const createMaintenanceRecord = async (req, res) => {
       }
 
       case 'condominios': {
-        const { NUM_CASA, ID_TIPO_CONDOMINIO, USUARIOS_POR_CASA } = data;
-        if (!NUM_CASA) {
+        const { NUM_CASA, DESCRIPCION, ID_TIPO_CONDOMINIO, USUARIOS_POR_CASA } = data;
+        const nombreCasa = NUM_CASA || DESCRIPCION;
+        if (!nombreCasa) {
           return res.status(400).json({ success: false, message: 'El número o identificador de casa es obligatorio.' });
         }
         await connection.query(`
           INSERT INTO TBL_CONDOMINIOS (DESCRIPCION, ID_TIPO_CONDOMINIO, USUARIOS_POR_CASA)
           VALUES (?, ?, ?);
         `, [
-          String(NUM_CASA).trim(),
+          String(nombreCasa).trim(),
           Number(ID_TIPO_CONDOMINIO) || 1,
-          Number(USUARIOS_POR_CASA) || 4
+          USUARIOS_POR_CASA !== undefined && USUARIOS_POR_CASA !== null && USUARIOS_POR_CASA !== '' ? Number(USUARIOS_POR_CASA) : 4
         ]);
         break;
       }
@@ -1258,8 +1289,8 @@ const updateMaintenanceRecord = async (req, res) => {
           if (finalCondominio) {
             // Validar capacidad máxima permitida del condominio (USUARIOS_POR_CASA) excluyendo al propio usuario si ya residía aquí
             const [condoInfo] = await connection.query(
-              'SELECT DESCRIPCION, USUARIOS_POR_CASA FROM TBL_CONDOMINIOS WHERE ID_CONDOMINIO = ?',
-              [finalCondominio]
+              'SELECT ID_CONDOMINIO, DESCRIPCION, USUARIOS_POR_CASA FROM TBL_CONDOMINIOS WHERE ID_CONDOMINIO = ? OR DESCRIPCION = ? LIMIT 1',
+              [finalCondominio, String(finalCondominio)]
             );
 
             if (condoInfo.length === 0) {
@@ -1267,9 +1298,16 @@ const updateMaintenanceRecord = async (req, res) => {
               return res.status(400).json({ success: false, message: 'El condominio seleccionado no existe.' });
             }
 
+            finalCondominio = condoInfo[0].ID_CONDOMINIO;
             const maxCapacidad = Number(condoInfo[0].USUARIOS_POR_CASA) || 4;
             const [resCount] = await connection.query(
-              'SELECT COUNT(*) AS total FROM TBL_PERSONAS WHERE ID_CONDOMINIO = ? AND ID_USUARIO != ?',
+              `SELECT COUNT(*) AS total 
+               FROM TBL_PERSONAS p
+               LEFT JOIN TBL_MS_USUARIO u ON p.ID_USUARIO = u.ID_USUARIO
+               WHERE p.ID_CONDOMINIO = ? 
+                 AND (p.ID_USUARIO IS NULL OR p.ID_USUARIO != ?)
+                 AND (u.ID_ESTADO_USUARIO IS NULL OR u.ID_ESTADO_USUARIO != 2)
+                 AND (p.ID_ESTADO_PERSONA IS NULL OR p.ID_ESTADO_PERSONA != 2)`,
               [finalCondominio, id]
             );
 
@@ -1277,7 +1315,7 @@ const updateMaintenanceRecord = async (req, res) => {
               await connection.rollback();
               return res.status(400).json({
                 success: false,
-                message: `El condominio ${condoInfo[0].DESCRIPCION} ha alcanzado su capacidad máxima permitida (${maxCapacidad} residentes). No es posible asignar más usuarios a esta vivienda.`
+                message: `El condominio ${condoInfo[0].DESCRIPCION} ha alcanzado su capacidad máxima permitida (${maxCapacidad} usuarios/residentes). No es posible asignar más usuarios a esta vivienda.`
               });
             }
           }
@@ -1423,14 +1461,19 @@ const updateMaintenanceRecord = async (req, res) => {
       }
 
       case 'condominios': {
-        const { NUM_CASA, ID_TIPO_CONDOMINIO, USUARIOS_POR_CASA } = updates;
+        const { NUM_CASA, DESCRIPCION, ID_TIPO_CONDOMINIO, USUARIOS_POR_CASA } = updates;
+        const nombreCasa = NUM_CASA !== undefined ? NUM_CASA : DESCRIPCION;
+        const capacidadNum = (USUARIOS_POR_CASA !== undefined && USUARIOS_POR_CASA !== null && USUARIOS_POR_CASA !== '')
+          ? Number(USUARIOS_POR_CASA)
+          : null;
+
         await connection.query(`
           UPDATE TBL_CONDOMINIOS SET
             DESCRIPCION = COALESCE(?, DESCRIPCION),
             ID_TIPO_CONDOMINIO = COALESCE(?, ID_TIPO_CONDOMINIO),
             USUARIOS_POR_CASA = COALESCE(?, USUARIOS_POR_CASA)
           WHERE ID_CONDOMINIO = ?;
-        `, [NUM_CASA, ID_TIPO_CONDOMINIO, USUARIOS_POR_CASA, id]);
+        `, [nombreCasa, ID_TIPO_CONDOMINIO, capacidadNum, id]);
         break;
       }
 
@@ -1485,6 +1528,7 @@ const deleteMaintenanceRecord = async (req, res) => {
       case 'usuarios': {
         // En usuarios hacemos desactivación de estado para no romper integridad de bitácora
         await connection.query('UPDATE TBL_MS_USUARIO SET ID_ESTADO_USUARIO = 2 WHERE ID_USUARIO = ?', [id]);
+        await connection.query('UPDATE TBL_PERSONAS SET ID_ESTADO_PERSONA = 2 WHERE ID_USUARIO = ?', [id]);
         break;
       }
 

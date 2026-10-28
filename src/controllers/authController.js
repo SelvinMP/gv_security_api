@@ -324,8 +324,14 @@ const getCondos = async (req, res) => {
       SELECT 
         c.ID_CONDOMINIO, 
         c.DESCRIPCION,
-        c.USUARIOS_POR_CASA,
-        (SELECT COUNT(*) FROM TBL_PERSONAS p WHERE p.ID_CONDOMINIO = c.ID_CONDOMINIO) AS RESIDENTES_ACTUALES
+        COALESCE(c.USUARIOS_POR_CASA, 4) AS USUARIOS_POR_CASA,
+        (SELECT COUNT(*) 
+         FROM TBL_PERSONAS p
+         LEFT JOIN TBL_MS_USUARIO u ON p.ID_USUARIO = u.ID_USUARIO
+         WHERE p.ID_CONDOMINIO = c.ID_CONDOMINIO
+           AND (u.ID_ESTADO_USUARIO IS NULL OR u.ID_ESTADO_USUARIO != 2)
+           AND (p.ID_ESTADO_PERSONA IS NULL OR p.ID_ESTADO_PERSONA != 2)
+        ) AS RESIDENTES_ACTUALES
       FROM TBL_CONDOMINIOS c
       ORDER BY CAST(c.DESCRIPCION AS UNSIGNED) ASC, c.ID_CONDOMINIO ASC
     `);
@@ -388,7 +394,13 @@ const savePersonalData = async (req, res) => {
     const maxPermitidos = Number(USUARIOS_POR_CASA) || 4;
 
     const [regCount] = await connection.query(
-      "SELECT COUNT(*) AS total FROM TBL_PERSONAS WHERE ID_CONDOMINIO = ? AND ID_USUARIO != ?",
+      `SELECT COUNT(*) AS total 
+       FROM TBL_PERSONAS p
+       LEFT JOIN TBL_MS_USUARIO u ON p.ID_USUARIO = u.ID_USUARIO
+       WHERE p.ID_CONDOMINIO = ? 
+         AND (p.ID_USUARIO IS NULL OR p.ID_USUARIO != ?)
+         AND (u.ID_ESTADO_USUARIO IS NULL OR u.ID_ESTADO_USUARIO != 2)
+         AND (p.ID_ESTADO_PERSONA IS NULL OR p.ID_ESTADO_PERSONA != 2)`,
       [ID_CONDOMINIO, id_usuario]
     );
 
@@ -396,8 +408,8 @@ const savePersonalData = async (req, res) => {
       await connection.rollback();
       return res.status(400).json({
         success: false,
-        error: `El condominio ${nombreCondo} ha alcanzado su capacidad máxima permitida (${maxPermitidos} residentes). No es posible asignar más usuarios a esta vivienda.`,
-        message: `El condominio ${nombreCondo} ha alcanzado su capacidad máxima permitida (${maxPermitidos} residentes). No es posible asignar más usuarios a esta vivienda.`
+        error: `El condominio ${nombreCondo} ha alcanzado su capacidad máxima permitida (${maxPermitidos} usuarios/residentes). No es posible asignar más usuarios a esta vivienda.`,
+        message: `El condominio ${nombreCondo} ha alcanzado su capacidad máxima permitida (${maxPermitidos} usuarios/residentes). No es posible asignar más usuarios a esta vivienda.`
       });
     }
 
@@ -765,15 +777,18 @@ const approveUser = async (req, res) => {
         SELECT COUNT(*) AS total
         FROM TBL_PERSONAS p
         JOIN TBL_MS_USUARIO u ON p.ID_USUARIO = u.ID_USUARIO
-        WHERE p.ID_CONDOMINIO = ? AND u.ID_ESTADO_USUARIO = 1 AND p.ID_USUARIO != ?
+        WHERE p.ID_CONDOMINIO = ? 
+          AND (u.ID_ESTADO_USUARIO IS NULL OR u.ID_ESTADO_USUARIO != 2)
+          AND (p.ID_ESTADO_PERSONA IS NULL OR p.ID_ESTADO_PERSONA != 2)
+          AND p.ID_USUARIO != ?
       `, [ID_CONDOMINIO, targetUsuarioId]);
 
       if (activeCount[0].total >= maxCapacidad) {
         await connection.rollback();
         return res.status(400).json({
           success: false,
-          error: `El condominio ${nombreCondo} ya cuenta con el número máximo permitido de residentes activos (${maxCapacidad}). No se puede aprobar otro usuario.`,
-          message: `El condominio ${nombreCondo} ya cuenta con el número máximo permitido de residentes activos (${maxCapacidad}). No se puede aprobar otro usuario.`
+          error: `El condominio ${nombreCondo} ya cuenta con el número máximo permitido de usuarios registrados (${maxCapacidad}). No se puede aprobar otro usuario.`,
+          message: `El condominio ${nombreCondo} ya cuenta con el número máximo permitido de usuarios registrados (${maxCapacidad}). No se puede aprobar otro usuario.`
         });
       }
     }
