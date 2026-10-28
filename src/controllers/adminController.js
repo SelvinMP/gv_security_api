@@ -920,13 +920,16 @@ const createMaintenanceRecord = async (req, res) => {
           return res.status(400).json({ success: false, message: 'Nombre, email y contraseña son obligatorios.' });
         }
 
+        const nombreVal = String(NOMBRE_USUARIO).trim().toUpperCase();
+        const emailVal = String(EMAIL).trim().toLowerCase();
+
         // Proteger el rol de Super Administrador
         if (Number(ID_ROL) === 1) {
           await connection.rollback();
           return res.status(403).json({ success: false, message: 'El rol de Super Administrador solo puede ser asignado a nivel de base de datos.' });
         }
 
-        const [exists] = await connection.query('SELECT ID_USUARIO FROM TBL_MS_USUARIO WHERE EMAIL = ?', [EMAIL]);
+        const [exists] = await connection.query('SELECT ID_USUARIO FROM TBL_MS_USUARIO WHERE EMAIL = ?', [emailVal]);
         if (exists.length > 0) {
           await connection.rollback();
           return res.status(400).json({ success: false, message: 'El correo electrónico ya está registrado.' });
@@ -977,7 +980,7 @@ const createMaintenanceRecord = async (req, res) => {
           const tipoContactoId = Number(ID_TIPO_CONTACTO) || 1; // Default: TELEFONO MOVIL (1)
           const [ctResult] = await connection.query(
             'INSERT INTO TBL_CONTACTOS (ID_TIPO_CONTACTO, DESCRIPCION) VALUES (?, ?)',
-            [tipoContactoId, String(CONTACTO).trim()]
+            [tipoContactoId, String(CONTACTO).trim().toUpperCase()]
           );
           contactoId = ctResult.insertId;
         }
@@ -988,16 +991,16 @@ const createMaintenanceRecord = async (req, res) => {
         let carnetVal = null;
 
         if (nacionalidadId === 2) {
-          carnetVal = NUM_CARNET_EXTRANJERO ? String(NUM_CARNET_EXTRANJERO).trim() : (DNI_PERSONA ? String(DNI_PERSONA).trim() : null);
+          carnetVal = NUM_CARNET_EXTRANJERO ? String(NUM_CARNET_EXTRANJERO).trim().toUpperCase() : (DNI_PERSONA ? String(DNI_PERSONA).trim().toUpperCase() : null);
         } else {
-          dniVal = DNI_PERSONA ? String(DNI_PERSONA).trim() : null;
+          dniVal = DNI_PERSONA ? String(DNI_PERSONA).trim().toUpperCase() : null;
         }
 
         const hashedPassword = await bcrypt.hash(CONTRASEÑA, 8);
         const [userResult] = await connection.query(`
           INSERT INTO TBL_MS_USUARIO (NOMBRE_USUARIO, EMAIL, CONTRASEÑA, ID_ROL, ID_ESTADO_USUARIO, PRIMER_INGRESO_COMPLETADO, PRIMER_INGRESO)
           VALUES (?, ?, ?, ?, ?, 1, NOW());
-        `, [NOMBRE_USUARIO, EMAIL, hashedPassword, rolNum, ID_ESTADO_USUARIO || 1]);
+        `, [nombreVal, emailVal, hashedPassword, rolNum, ID_ESTADO_USUARIO || 1]);
 
         const newUserId = userResult.insertId;
 
@@ -1158,8 +1161,16 @@ const updateMaintenanceRecord = async (req, res) => {
           return res.status(403).json({ success: false, message: 'El rol de Super Administrador solo puede ser asignado a nivel de base de datos.' });
         }
 
+        const nombreVal = NOMBRE_USUARIO !== undefined ? (NOMBRE_USUARIO ? String(NOMBRE_USUARIO).trim().toUpperCase() : null) : undefined;
+        const emailVal = EMAIL !== undefined ? (EMAIL ? String(EMAIL).trim().toLowerCase() : null) : undefined;
+
         let passwordQuery = '';
-        const params = [NOMBRE_USUARIO, EMAIL, ID_ROL, ID_ESTADO_USUARIO];
+        const params = [
+          nombreVal !== undefined ? nombreVal : null,
+          emailVal !== undefined ? emailVal : null,
+          ID_ROL,
+          ID_ESTADO_USUARIO
+        ];
 
         if (CONTRASEÑA && CONTRASEÑA.trim() !== '') {
           const hashedPassword = await bcrypt.hash(CONTRASEÑA, 8);
@@ -1231,7 +1242,7 @@ const updateMaintenanceRecord = async (req, res) => {
         // Manejo de Contacto (TBL_CONTACTOS)
         let contactoId = existingPersona[0]?.ID_CONTACTO || null;
         if (CONTACTO !== undefined) {
-          const contactoTexto = CONTACTO ? String(CONTACTO).trim() : '';
+          const contactoTexto = CONTACTO ? String(CONTACTO).trim().toUpperCase() : '';
           const tipoContactoId = Number(ID_TIPO_CONTACTO) || 1;
 
           if (contactoTexto !== '') {
@@ -1255,8 +1266,8 @@ const updateMaintenanceRecord = async (req, res) => {
           ? Number(ID_NACIONALIDAD) 
           : (existingPersona[0]?.ID_NACIONALIDAD || 1);
 
-        let dniVal = DNI_PERSONA !== undefined ? (DNI_PERSONA ? String(DNI_PERSONA).trim() : null) : undefined;
-        let carnetVal = NUM_CARNET_EXTRANJERO !== undefined ? (NUM_CARNET_EXTRANJERO ? String(NUM_CARNET_EXTRANJERO).trim() : null) : undefined;
+        let dniVal = DNI_PERSONA !== undefined ? (DNI_PERSONA ? String(DNI_PERSONA).trim().toUpperCase() : null) : undefined;
+        let carnetVal = NUM_CARNET_EXTRANJERO !== undefined ? (NUM_CARNET_EXTRANJERO ? String(NUM_CARNET_EXTRANJERO).trim().toUpperCase() : null) : undefined;
 
         if (nacionalidadId === 2) {
           if (carnetVal === undefined && dniVal !== undefined) {
