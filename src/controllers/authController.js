@@ -27,6 +27,61 @@ const encrypt = (text) => {
   return encrypted;
 };
 
+// Helper para descifrar
+const decrypt = (encryptedHex) => {
+  try {
+    const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(ENCRYPTION_KEY, "hex"), Buffer.alloc(16, 0));
+    let decrypted = decipher.update(encryptedHex, "hex", "utf8");
+    decrypted += decipher.final("utf8");
+    return decrypted;
+  } catch (err) {
+    return null;
+  }
+};
+
+// Genera un código OTP de 6 caracteres con fecha de expiración (por defecto 10 minutos)
+const generateVerificationPayload = (codeLength = 6, expirationMinutes = 10) => {
+  const code = crypto.randomBytes(3).toString("hex").toUpperCase();
+  const expiresAt = Date.now() + (expirationMinutes * 60 * 1000);
+  const rawPayload = `${code}:${expiresAt}`;
+  const encrypted = encrypt(rawPayload);
+  return { code, expiresAt, encrypted };
+};
+
+// Valida si el código introducido coincide y si no ha expirado
+const validateVerificationCode = (inputCode, storedEncrypted) => {
+  if (!storedEncrypted || !inputCode) {
+    return { valid: false, expired: false, reason: "Código no encontrado" };
+  }
+
+  const cleanInput = inputCode.trim().toUpperCase();
+
+  // 1. Probar formato con expiración (CODE:TIMESTAMP)
+  const decrypted = decrypt(storedEncrypted);
+  if (decrypted && decrypted.includes(":")) {
+    const [storedCode, expiresAtStr] = decrypted.split(":");
+    const expiresAt = parseInt(expiresAtStr, 10);
+
+    if (Date.now() > expiresAt) {
+      return { valid: false, expired: true, reason: "El código de verificación ha expirado. Por favor solicita uno nuevo." };
+    }
+
+    if (storedCode.toUpperCase() === cleanInput) {
+      return { valid: true, expired: false };
+    } else {
+      return { valid: false, expired: false, reason: "Código de verificación incorrecto" };
+    }
+  }
+
+  // 2. Compatibilidad con formato anterior cifrado directo
+  const legacyEncrypted = encrypt(cleanInput);
+  if (storedEncrypted === legacyEncrypted) {
+    return { valid: true, expired: false };
+  }
+
+  return { valid: false, expired: false, reason: "Código de verificación incorrecto" };
+};
+
 const register = async (req, res) => {
   const { NOMBRE_USUARIO, EMAIL, CONTRASEÑA } = req.body;
 
@@ -40,8 +95,7 @@ const register = async (req, res) => {
     await connection.beginTransaction();
 
     const hashedPassword = await bcrypt.hash(CONTRASEÑA, 8);
-    const verificationCode = crypto.randomBytes(3).toString("hex").toUpperCase();
-    const encryptedCode = encrypt(verificationCode);
+    const { code: verificationCode, encrypted: encryptedCode } = generateVerificationPayload(6, 10);
 
     const [existingUsers] = await connection.query(
       "SELECT ID_USUARIO, PRIMER_INGRESO_COMPLETADO, ID_ESTADO_USUARIO FROM TBL_MS_USUARIO WHERE EMAIL = ?",
@@ -82,12 +136,13 @@ const register = async (req, res) => {
       from: `"GV-Security Support" <${process.env.EMAIL_USER}>`,
       to: EMAIL,
       subject: "Código de Verificación - Registro",
-      html: `<div style="font-family: sans-serif; border: 1px solid #ddd; padding: 20px;">
-          <h2>Verifica tu cuenta</h2>
+      html: `<div style="font-family: sans-serif; border: 1px solid #ddd; padding: 25px; border-radius: 8px;">
+          <h2 style="color: #0E2041;">Verifica tu cuenta</h2>
           <p>Hola <strong>${NOMBRE_USUARIO}</strong>,</p>
-          <p>Usa el siguiente código para completar tu registro en GV-Security:</p>
-          <p style="font-size: 32px; font-weight: bold; color: #d4af37; letter-spacing: 5px;">${verificationCode}</p>
-          <p>Si no solicitaste esto, ignora este correo.</p>
+          <p>Usa el siguiente código de un solo uso para completar tu registro en GV-Security:</p>
+          <p style="font-size: 32px; font-weight: bold; color: #d4af37; letter-spacing: 5px; margin: 20px 0;">${verificationCode}</p>
+          <p style="color: #555; font-size: 14px;">⏱️ Este código es válido durante <strong>10 minutos</strong>.</p>
+          <p style="color: #888; font-size: 12px; margin-top: 20px;">Si no solicitaste esto, ignora este correo con seguridad.</p>
         </div>`
     };
 
@@ -152,8 +207,7 @@ const login = async (req, res) => {
     const token = jwt.sign({ id: user.ID_USUARIO, role: user.ID_ROL }, SECRET_KEY, { expiresIn: '2h' });
 
     if (Number(user.CODIGO_2FA) === 1) {
-      const verificationCode = crypto.randomBytes(3).toString("hex").toUpperCase();
-      const encryptedCode = encrypt(verificationCode);
+      const { code: verificationCode, encrypted: encryptedCode } = generateVerificationPayload(6, 10);
 
       await connection.query("UPDATE TBL_MS_USUARIO SET CODIGO_VERIFICACION = ? WHERE EMAIL = ?", [encryptedCode, username]);
 
@@ -161,12 +215,13 @@ const login = async (req, res) => {
         from: `"GV-Security Support" <${process.env.EMAIL_USER}>`,
         to: username,
         subject: "Código de Verificación 2FA",
-        html: `<div style="font-family: sans-serif; padding: 20px; border: 1px solid #ddd;">
-            <h2>Autenticación de Dos Pasos</h2>
+        html: `<div style="font-family: sans-serif; padding: 25px; border: 1px solid #ddd; border-radius: 8px;">
+            <h2 style="color: #0E2041;">Autenticación de Dos Pasos</h2>
             <p>Hola,</p>
-            <p>Tu código de verificación de seguridad es:</p>
-            <p style="font-size: 32px; font-weight: bold; color: #d4af37; letter-spacing: 5px;">${verificationCode}</p>
-            <p>Si no solicitaste este código, te recomendamos cambiar tu contraseña inmediatamente.</p>
+            <p>Tu código de verificación de seguridad para acceder a tu cuenta es:</p>
+            <p style="font-size: 32px; font-weight: bold; color: #d4af37; letter-spacing: 5px; margin: 20px 0;">${verificationCode}</p>
+            <p style="color: #555; font-size: 14px;">⏱️ Este código es válido durante <strong>10 minutos</strong>.</p>
+            <p style="color: #888; font-size: 12px; margin-top: 20px;">Si no solicitaste este código, te recomendamos cambiar tu contraseña inmediatamente.</p>
           </div>`
       };
 
@@ -209,8 +264,17 @@ const verify2FA = async (req, res) => {
     const user = rows[0];
     if (user.ID_ESTADO_USUARIO === 3) return res.status(403).json({ message: "Cuenta bloqueada" });
 
-    const encryptedInput = encrypt(codigo.toUpperCase());
-    if (user.CODIGO_VERIFICACION !== encryptedInput) {
+    const validation = validateVerificationCode(codigo, user.CODIGO_VERIFICACION);
+
+    if (validation.expired) {
+      return res.status(400).json({ 
+        success: false, 
+        expired: true, 
+        message: "El código 2FA ha expirado. Por favor solicita uno nuevo con el botón Reenviar." 
+      });
+    }
+
+    if (!validation.valid) {
       // Incrementar intentos fallidos
       await connection.query("UPDATE TBL_MS_USUARIO SET INTENTOS_FALLIDOS = INTENTOS_FALLIDOS + 1 WHERE ID_USUARIO = ?", [id_usuario]);
       
@@ -228,7 +292,7 @@ const verify2FA = async (req, res) => {
       });
     }
 
-    // Éxito: Resetear intentos y limpiar código
+    // Éxito: Resetear intentos y limpiar código para que no pueda ser reutilizado
     await connection.query("UPDATE TBL_MS_USUARIO SET CODIGO_VERIFICACION = NULL, INTENTOS_FALLIDOS = 0, PRIMER_INGRESO_COMPLETADO = 1 WHERE ID_USUARIO = ?", [id_usuario]);
     
     const token = jwt.sign({ id: id_usuario, role: user.ID_ROL }, SECRET_KEY, { expiresIn: '2h' }); 
@@ -262,14 +326,22 @@ const verifyRegistration = async (req, res) => {
     if (rows.length === 0) return res.status(401).json({ message: "Usuario no encontrado" });
 
     const user = rows[0];
-    const encryptedInput = encrypt(codigo.toUpperCase());
+    const validation = validateVerificationCode(codigo, user.CODIGO_VERIFICACION);
 
-    if (user.CODIGO_VERIFICACION !== encryptedInput) {
-      return res.status(401).json({ message: "Código de verificación incorrecto" });
+    if (validation.expired) {
+      return res.status(400).json({ 
+        success: false, 
+        expired: true, 
+        message: "El código de verificación ha expirado. Por favor solicita uno nuevo con el botón Reenviar." 
+      });
+    }
+
+    if (!validation.valid) {
+      return res.status(401).json({ success: false, message: "Código de verificación incorrecto" });
     }
 
     // No cambiamos el estado aquí todavía, ya que falta el paso de datos personales.
-    // Simplemente validamos el código.
+    // Simplemente validamos el código y lo limpiamos para evitar que sea reutilizado.
     await connection.query(
       "UPDATE TBL_MS_USUARIO SET CODIGO_VERIFICACION = NULL WHERE ID_USUARIO = ?", 
       [id_usuario]
@@ -570,50 +642,131 @@ const notifyAdmins = async (nombre, contacto, condo, isNewAdmin, condoId, esHond
   }
 };
 
-const get2FAStatus = async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ message: "Token no proporcionado" });
+const resendVerificationCode = async (req, res) => {
+  const { id_usuario, email, type } = req.body;
+  if (!id_usuario && !email) {
+    return res.status(400).json({ message: "Se requiere ID de usuario o correo electrónico" });
+  }
 
-  const token = authHeader.split(" ")[1];
   let connection;
   try {
-    const decoded = jwt.verify(token, SECRET_KEY);
-    const userId = decoded.id;
+    connection = await mysqlPool.getConnection();
+    const query = id_usuario 
+      ? "SELECT ID_USUARIO, NOMBRE_USUARIO, EMAIL, ID_ESTADO_USUARIO, CODIGO_2FA FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?"
+      : "SELECT ID_USUARIO, NOMBRE_USUARIO, EMAIL, ID_ESTADO_USUARIO, CODIGO_2FA FROM TBL_MS_USUARIO WHERE EMAIL = ?";
+    const param = id_usuario || email;
 
+    const [rows] = await connection.query(query, [param]);
+    if (rows.length === 0) {
+      return res.status(404).json({ message: "Usuario no encontrado" });
+    }
+
+    const user = rows[0];
+    if (user.ID_ESTADO_USUARIO === 3) {
+      return res.status(403).json({ message: "Usuario bloqueado. Contacte al administrador." });
+    }
+
+    const is2FA = type === '2fa' || (req.path && req.path.includes('2fa'));
+    const { code: newCode, encrypted: encryptedCode } = generateVerificationPayload(6, 10);
+
+    await connection.query(
+      "UPDATE TBL_MS_USUARIO SET CODIGO_VERIFICACION = ? WHERE ID_USUARIO = ?",
+      [encryptedCode, user.ID_USUARIO]
+    );
+
+    const subject = is2FA ? "Código de Verificación 2FA" : "Código de Verificación - Registro";
+    const title = is2FA ? "Autenticación de Dos Pasos" : "Verifica tu cuenta";
+    const desc = is2FA 
+      ? "Tu nuevo código de verificación de seguridad para acceder a tu cuenta es:" 
+      : `Hola <strong>${user.NOMBRE_USUARIO || 'Usuario'}</strong>,<br/>Usa el siguiente nuevo código para completar tu verificación:`;
+
+    const mailOptions = {
+      from: `"GV-Security Support" <${process.env.EMAIL_USER}>`,
+      to: user.EMAIL,
+      subject: subject,
+      html: `<div style="font-family: sans-serif; border: 1px solid #ddd; padding: 25px; border-radius: 8px;">
+          <h2 style="color: #0E2041;">${title}</h2>
+          <p>${desc}</p>
+          <p style="font-size: 32px; font-weight: bold; color: #d4af37; letter-spacing: 5px; margin: 20px 0;">${newCode}</p>
+          <p style="color: #555; font-size: 14px;">⏱️ Este código es válido durante <strong>10 minutos</strong>.</p>
+          <p style="color: #888; font-size: 12px; margin-top: 20px;">Si no solicitaste este código, puedes ignorar este mensaje.</p>
+        </div>`
+    };
+
+    try {
+      await sendMailWithTimeout(mailOptions);
+    } catch (mailErr) {
+      console.warn("⚠️ Error reenviando correo (SMTP):", mailErr.message);
+      console.log(`🔑 CÓDIGO REENVIADO PARA ${user.EMAIL}: ${newCode}`);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Nuevo código enviado con éxito a ${user.EMAIL}.`,
+      expiresInMinutes: 10
+    });
+  } catch (err) {
+    console.error("Error en resendVerificationCode:", err);
+    res.status(500).json({ message: "Error interno al reenviar el código" });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+const get2FAStatus = async (req, res) => {
+  let userId = null;
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    try {
+      const decoded = jwt.verify(authHeader.split(" ")[1], SECRET_KEY);
+      userId = decoded.id;
+    } catch (e) {}
+  }
+  if (!userId) {
+    userId = req.query.id_usuario || req.query.userId || req.params.usuarioId;
+  }
+  if (!userId) return res.status(401).json({ message: "Token o ID de usuario no proporcionado" });
+
+  let connection;
+  try {
     connection = await mysqlPool.getConnection();
     const [results] = await connection.query("SELECT CODIGO_2FA FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?", [userId]);
 
     if (results.length > 0) {
-      res.json({ enabled: results[0].CODIGO_2FA });
+      res.json({ enabled: results[0].CODIGO_2FA === 1 ? 1 : 0 });
     } else {
       res.status(404).json({ message: "Usuario no encontrado" });
     }
   } catch (error) {
-    res.status(500).json({ message: "Error al verificar el token o consultar estado" });
+    res.status(500).json({ message: "Error al consultar estado de 2FA" });
   } finally {
     if (connection) connection.release();
   }
 };
 
 const set2FAStatus = async (req, res) => {
+  let userId = null;
   const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ message: "Token no proporcionado" });
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    try {
+      const decoded = jwt.verify(authHeader.split(" ")[1], SECRET_KEY);
+      userId = decoded.id;
+    } catch (e) {}
+  }
+  if (!userId) {
+    userId = req.body.id_usuario || req.body.userId;
+  }
+  if (!userId) return res.status(401).json({ message: "Token o ID de usuario no proporcionado" });
 
-  const token = authHeader.split(" ")[1];
+  const { enabled } = req.body;
+  const enabledNum = (enabled === 1 || enabled === true || enabled === '1') ? 1 : 0;
+
   let connection;
   try {
-    const decoded = jwt.verify(token, SECRET_KEY);
-    const userId = decoded.id;
-
-    const { enabled } = req.body; // 0 o 1
-    if (typeof enabled !== "number" || (enabled !== 0 && enabled !== 1)) {
-      return res.status(400).json({ message: "Valor inválido para 2FA" });
-    }
-
     connection = await mysqlPool.getConnection();
-    await connection.query("UPDATE TBL_MS_USUARIO SET CODIGO_2FA = ? WHERE ID_USUARIO = ?", [enabled, userId]);
+    await connection.query("UPDATE TBL_MS_USUARIO SET CODIGO_2FA = ? WHERE ID_USUARIO = ?", [enabledNum, userId]);
 
-    res.json({ success: true, message: "Estado de 2FA actualizado correctamente" });
+    res.json({ success: true, enabled: enabledNum, message: "Estado de 2FA actualizado correctamente" });
   } catch (error) {
     res.status(500).json({ message: "Error al actualizar estado de 2FA" });
   } finally {
@@ -1248,6 +1401,7 @@ module.exports = {
   login,
   verify2FA,
   verifyRegistration,
+  resendVerificationCode,
   enviarCodigoRecuperacion,
   verificarCodigoRecuperacion,
   actualizarContrasena,
