@@ -1,3 +1,8 @@
+const dns = require('dns');
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder('ipv4first');
+}
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -61,10 +66,17 @@ app.post('/api/check-connection', (req, res) => {
     res.json({ success: true, message: "Conexión exitosa con el Backend" });
 });
 
+app.get('/health', (req, res) => {
+    res.status(200).send('OK');
+});
+
 // 4. Configuración del Puerto (Optimizado para Render)
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+// Render asigna dinámicamente process.env.PORT (usualmente 10000) y requiere enlazar a 0.0.0.0
+const PORT = process.env.PORT || 10000;
+const HOST = '0.0.0.0';
+
+app.listen(PORT, HOST, () => {
     console.log('==============================================');
-    console.log(`🚀 Servidor corriendo en puerto: ${PORT}`);
+    console.log(`🚀 Servidor corriendo en http://${HOST}:${PORT}`);
     console.log('==============================================');
 });
