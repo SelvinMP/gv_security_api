@@ -114,7 +114,7 @@ const login = async (req, res) => {
   try {
     connection = await mysqlPool.getConnection();
     const [rows] = await connection.query("SELECT * FROM TBL_MS_USUARIO WHERE EMAIL = ?", [username]);
-    if (rows.length === 0) return res.status(401).json({ message: "Usuario no encontrado" });
+    if (rows.length === 0) return res.status(401).json({ message: "Usuario o contraseña incorrecta" });
 
     const user = rows[0];
 
@@ -137,7 +137,7 @@ const login = async (req, res) => {
           return res.status(403).json({ message: "Usuario bloqueado por múltiples intentos fallidos" });
         }
       }
-      return res.status(401).json({ message: "Contraseña incorrecta" });
+      return res.status(401).json({ message: "Usuario o contraseña incorrecta" });
     }
 
     await connection.query(`UPDATE TBL_MS_USUARIO SET INTENTOS_FALLIDOS = 0, PRIMER_INGRESO = IF(PRIMER_INGRESO IS NULL, NOW(), PRIMER_INGRESO) WHERE EMAIL = ?`, [username]);

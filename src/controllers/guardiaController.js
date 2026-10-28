@@ -15,7 +15,7 @@ const loginGuardia = async (req, res) => {
   try {
     connection = await mysqlPool.getConnection();
     const [rows] = await connection.query("SELECT * FROM TBL_MS_USUARIO WHERE EMAIL = ?", [username]);
-    if (rows.length === 0) return res.status(401).json({ message: "Usuario no encontrado" });
+    if (rows.length === 0) return res.status(401).json({ message: "Usuario o contraseña incorrecta" });
 
     const user = rows[0];
 
@@ -31,7 +31,7 @@ const loginGuardia = async (req, res) => {
 
     const passwordIsValid = await bcrypt.compare(password, user.CONTRASEÑA);
     if (!passwordIsValid) {
-      return res.status(401).json({ message: "Contraseña incorrecta" });
+      return res.status(401).json({ message: "Usuario o contraseña incorrecta" });
     }
 
     const token = jwt.sign({ id: user.ID_USUARIO, role: user.ID_ROL }, SECRET_KEY, { expiresIn: '8h' });
