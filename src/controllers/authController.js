@@ -91,7 +91,14 @@ const register = async (req, res) => {
         </div>`
     };
 
-    await sendMailWithTimeout(mailOptions);
+    try {
+      await sendMailWithTimeout(mailOptions);
+    } catch (mailErr) {
+      console.warn("⚠️ Error enviando correo de verificación (SMTP):", mailErr.message);
+      console.log("\n=======================================================");
+      console.log(`🔑 CÓDIGO DE VERIFICACIÓN GENERADO PARA ${EMAIL}: ${verificationCode}`);
+      console.log("=======================================================\n");
+    }
     await connection.commit();
 
     const token = jwt.sign({ id: userId }, SECRET_KEY, { expiresIn: 1800 });
@@ -459,10 +466,10 @@ const savePersonalData = async (req, res) => {
     const [adminCheck] = await connection.query("SELECT COUNT(*) AS count FROM TBL_PERSONAS WHERE ID_CONDOMINIO = ? AND ID_PADRE = 1 AND ID_USUARIO != ?", [ID_CONDOMINIO, id_usuario]);
     const isAdminRequired = adminCheck[0].count === 0;
 
-    // 7. Actualizar Persona
+    // 7. Actualizar Persona (Estado 4: Nuevo / Pendiente de aceptación)
     const updateQuery = `
       UPDATE TBL_PERSONAS 
-      SET DNI_PERSONA = ?, NUM_CARNET_EXTRANJERO = ?, ID_NACIONALIDAD = ?, ID_CONTACTO = ?, ID_ESTADO_PERSONA = 1, ID_PARENTESCO = ?, ID_CONDOMINIO = ?, ID_PADRE = ?
+      SET DNI_PERSONA = ?, NUM_CARNET_EXTRANJERO = ?, ID_NACIONALIDAD = ?, ID_CONTACTO = ?, ID_ESTADO_PERSONA = 4, ID_PARENTESCO = ?, ID_CONDOMINIO = ?, ID_PADRE = ?
       WHERE ID_PERSONA = ?`;
     await connection.query(updateQuery, [
       dni ? String(dni).trim().toUpperCase() : null, 
@@ -795,6 +802,10 @@ const approveUser = async (req, res) => {
 
     await connection.query(
       'UPDATE TBL_MS_USUARIO SET ID_ESTADO_USUARIO = 1 WHERE ID_USUARIO = ?',
+      [targetUsuarioId]
+    );
+    await connection.query(
+      'UPDATE TBL_PERSONAS SET ID_ESTADO_PERSONA = 1 WHERE ID_USUARIO = ?',
       [targetUsuarioId]
     );
 
