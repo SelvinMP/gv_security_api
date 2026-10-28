@@ -554,6 +554,9 @@ const getFormOptions = async (req, res) => {
     const [instalaciones] = await connection.query('SELECT ID_INSTALACION, NOMBRE_INSTALACION, CAPACIDAD, PRECIO FROM TBL_INSTALACIONES ORDER BY ID_INSTALACION ASC');
     const [condominios] = await connection.query('SELECT ID_CONDOMINIO, DESCRIPCION FROM TBL_CONDOMINIOS ORDER BY CAST(DESCRIPCION AS UNSIGNED) ASC, ID_CONDOMINIO ASC');
     const [usuarios] = await connection.query('SELECT ID_USUARIO, NOMBRE_USUARIO, EMAIL FROM TBL_MS_USUARIO WHERE ID_ESTADO_USUARIO = 1 ORDER BY NOMBRE_USUARIO ASC');
+    const [nacionalidades] = await connection.query('SELECT ID_NACIONALIDAD, NOMBRE_NACIONALIDAD FROM TBL_NACIONALIDADES ORDER BY ID_NACIONALIDAD ASC');
+    const [parentescos] = await connection.query('SELECT ID_PARENTESCO, DESCRIPCION FROM TBL_PARENTESCOS ORDER BY ID_PARENTESCO ASC');
+    const [tiposContacto] = await connection.query('SELECT ID_TIPO_CONTACTO, DESCRIPCION FROM TBL_TIPO_CONTACTO ORDER BY ID_TIPO_CONTACTO ASC');
 
     res.status(200).json({
       success: true,
@@ -564,7 +567,10 @@ const getFormOptions = async (req, res) => {
         tiposCondominio,
         instalaciones,
         condominios,
-        usuarios
+        usuarios,
+        nacionalidades,
+        parentescos,
+        tiposContacto
       }
     });
   } catch (error) {
@@ -596,14 +602,29 @@ const getMaintenanceTable = async (req, res) => {
             r.ROL,
             u.ID_ESTADO_USUARIO,
             eu.DESCRIPCION AS ESTADO_USUARIO,
+            p.ID_PERSONA,
+            p.ID_NACIONALIDAD,
+            COALESCE(nac.NOMBRE_NACIONALIDAD, 'Hondureña') AS NACIONALIDAD,
             p.DNI_PERSONA,
+            p.NUM_CARNET_EXTRANJERO,
+            p.ID_PARENTESCO,
+            par.DESCRIPCION AS PARENTESCO,
+            p.ID_PADRE,
             p.ID_CONDOMINIO,
-            c.DESCRIPCION AS NUM_CASA
+            c.DESCRIPCION AS NUM_CASA,
+            p.ID_CONTACTO,
+            ct.ID_TIPO_CONTACTO,
+            COALESCE(tc.DESCRIPCION, 'TELEFONO MOVIL') AS TIPO_CONTACTO,
+            ct.DESCRIPCION AS CONTACTO
           FROM TBL_MS_USUARIO u
           LEFT JOIN TBL_MS_ROLES r ON u.ID_ROL = r.ID_ROL
           LEFT JOIN TBL_ESTADO_USUARIO eu ON u.ID_ESTADO_USUARIO = eu.ID_ESTADO_USUARIO
           LEFT JOIN TBL_PERSONAS p ON u.ID_USUARIO = p.ID_USUARIO
           LEFT JOIN TBL_CONDOMINIOS c ON p.ID_CONDOMINIO = c.ID_CONDOMINIO
+          LEFT JOIN TBL_NACIONALIDADES nac ON p.ID_NACIONALIDAD = nac.ID_NACIONALIDAD
+          LEFT JOIN TBL_PARENTESCOS par ON p.ID_PARENTESCO = par.ID_PARENTESCO
+          LEFT JOIN TBL_CONTACTOS ct ON p.ID_CONTACTO = ct.ID_CONTACTO
+          LEFT JOIN TBL_TIPO_CONTACTO tc ON ct.ID_TIPO_CONTACTO = tc.ID_TIPO_CONTACTO
           ORDER BY u.ID_USUARIO DESC;
         `);
         return res.status(200).json({ success: true, table, data: rows });
@@ -879,7 +900,22 @@ const createMaintenanceRecord = async (req, res) => {
 
     switch (table) {
       case 'usuarios': {
-        const { NOMBRE_USUARIO, EMAIL, CONTRASEÑA, ID_ROL, ID_ESTADO_USUARIO, DNI_PERSONA, ID_CONDOMINIO } = data;
+        const {
+          NOMBRE_USUARIO,
+          EMAIL,
+          CONTRASEÑA,
+          ID_ROL,
+          ID_ESTADO_USUARIO,
+          ID_NACIONALIDAD,
+          DNI_PERSONA,
+          NUM_CARNET_EXTRANJERO,
+          ID_CONDOMINIO,
+          ID_PARENTESCO,
+          ID_PADRE,
+          ID_TIPO_CONTACTO,
+          CONTACTO
+        } = data;
+
         if (!NOMBRE_USUARIO || !EMAIL || !CONTRASEÑA) {
           return res.status(400).json({ success: false, message: 'Nombre, email y contraseña son obligatorios.' });
         }
@@ -892,22 +928,104 @@ const createMaintenanceRecord = async (req, res) => {
 
         const [exists] = await connection.query('SELECT ID_USUARIO FROM TBL_MS_USUARIO WHERE EMAIL = ?', [EMAIL]);
         if (exists.length > 0) {
+          await connection.rollback();
           return res.status(400).json({ success: false, message: 'El correo electrónico ya está registrado.' });
+        }
+
+        const rolNum = Number(ID_ROL) || 2;
+        const isGuardia = (rolNum === 3);
+
+        let finalCondominio = null;
+        let finalParentesco = null;
+        let finalPadre = null;
+
+        if (!isGuardia) {
+          finalCondominio = ID_CONDOMINIO ? Number(ID_CONDOMINIO) : null;
+          finalParentesco = ID_PARENTESCO ? Number(ID_PARENTESCO) : null;
+
+          if (finalCondominio) {
+            // Verificar si este condominio ya tiene un ID_PADRE asignado (Administrador/Titular de la casa)
+            const [padreExistente] = await connection.query(
+              'SELECT ID_PERSONA, ID_USUARIO FROM TBL_PERSONAS WHERE ID_CONDOMINIO = ? AND ID_PADRE = 1',
+              [finalCondominio]
+            );
+
+            const quiereSerPadre = (ID_PADRE === 1 || ID_PADRE === '1' || ID_PADRE === true);
+
+            if (padreExistente.length === 0) {
+              // Regla de negocio: el primer usuario que se registre a ese condominio va a ser el administrador del condominio (ID_PADRE = 1)
+              finalPadre = 1;
+              if (!finalParentesco) {
+                finalParentesco = 9; // RESIDENTE PROPIETARIO
+              }
+            } else if (quiereSerPadre) {
+              // Regla de negocio: solo puede haber un ID_PADRE por casa para evitar malos entendidos. Se reasigna desmarcando al anterior.
+              await connection.query(
+                'UPDATE TBL_PERSONAS SET ID_PADRE = NULL WHERE ID_CONDOMINIO = ?',
+                [finalCondominio]
+              );
+              finalPadre = 1;
+            } else {
+              finalPadre = null;
+            }
+          }
+        }
+
+        // Manejo de contacto (TBL_CONTACTOS)
+        let contactoId = null;
+        if (CONTACTO && String(CONTACTO).trim() !== '') {
+          const tipoContactoId = Number(ID_TIPO_CONTACTO) || 1; // Default: TELEFONO MOVIL (1)
+          const [ctResult] = await connection.query(
+            'INSERT INTO TBL_CONTACTOS (ID_TIPO_CONTACTO, DESCRIPCION) VALUES (?, ?)',
+            [tipoContactoId, String(CONTACTO).trim()]
+          );
+          contactoId = ctResult.insertId;
+        }
+
+        // Documentos de identidad según nacionalidad
+        const nacionalidadId = Number(ID_NACIONALIDAD) || 1; // 1: Hondureña, 2: Extranjera
+        let dniVal = null;
+        let carnetVal = null;
+
+        if (nacionalidadId === 2) {
+          carnetVal = NUM_CARNET_EXTRANJERO ? String(NUM_CARNET_EXTRANJERO).trim() : (DNI_PERSONA ? String(DNI_PERSONA).trim() : null);
+        } else {
+          dniVal = DNI_PERSONA ? String(DNI_PERSONA).trim() : null;
         }
 
         const hashedPassword = await bcrypt.hash(CONTRASEÑA, 8);
         const [userResult] = await connection.query(`
           INSERT INTO TBL_MS_USUARIO (NOMBRE_USUARIO, EMAIL, CONTRASEÑA, ID_ROL, ID_ESTADO_USUARIO, PRIMER_INGRESO_COMPLETADO, PRIMER_INGRESO)
           VALUES (?, ?, ?, ?, ?, 1, NOW());
-        `, [NOMBRE_USUARIO, EMAIL, hashedPassword, ID_ROL || 2, ID_ESTADO_USUARIO || 1]);
+        `, [NOMBRE_USUARIO, EMAIL, hashedPassword, rolNum, ID_ESTADO_USUARIO || 1]);
 
         const newUserId = userResult.insertId;
 
-        // Crear registro en TBL_PERSONAS
+        // Crear registro en TBL_PERSONAS vinculado a newUserId
         await connection.query(`
-          INSERT INTO TBL_PERSONAS (ID_USUARIO, DNI_PERSONA, ID_CONDOMINIO, ID_ESTADO_PERSONA)
-          VALUES (?, ?, ?, ?);
-        `, [newUserId, DNI_PERSONA || null, ID_CONDOMINIO || null, ID_ESTADO_USUARIO || 1]);
+          INSERT INTO TBL_PERSONAS (
+            ID_USUARIO,
+            DNI_PERSONA,
+            NUM_CARNET_EXTRANJERO,
+            ID_NACIONALIDAD,
+            ID_CONDOMINIO,
+            ID_PARENTESCO,
+            ID_PADRE,
+            ID_CONTACTO,
+            ID_ESTADO_PERSONA
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+        `, [
+          newUserId,
+          dniVal,
+          carnetVal,
+          nacionalidadId,
+          finalCondominio,
+          finalParentesco,
+          finalPadre,
+          contactoId,
+          ID_ESTADO_USUARIO || 1
+        ]);
 
         break;
       }
@@ -1018,7 +1136,21 @@ const updateMaintenanceRecord = async (req, res) => {
 
     switch (table) {
       case 'usuarios': {
-        const { NOMBRE_USUARIO, EMAIL, CONTRASEÑA, ID_ROL, ID_ESTADO_USUARIO, DNI_PERSONA, ID_CONDOMINIO } = updates;
+        const {
+          NOMBRE_USUARIO,
+          EMAIL,
+          CONTRASEÑA,
+          ID_ROL,
+          ID_ESTADO_USUARIO,
+          ID_NACIONALIDAD,
+          DNI_PERSONA,
+          NUM_CARNET_EXTRANJERO,
+          ID_CONDOMINIO,
+          ID_PARENTESCO,
+          ID_PADRE,
+          ID_TIPO_CONTACTO,
+          CONTACTO
+        } = updates;
 
         // Proteger el rol de Super Administrador
         if (ID_ROL !== undefined && Number(ID_ROL) === 1) {
@@ -1047,23 +1179,144 @@ const updateMaintenanceRecord = async (req, res) => {
           WHERE ID_USUARIO = ?;
         `, params);
 
-        // Actualizar datos de persona
-        if (DNI_PERSONA !== undefined || ID_CONDOMINIO !== undefined) {
-          const [persona] = await connection.query('SELECT ID_PERSONA FROM TBL_PERSONAS WHERE ID_USUARIO = ?', [id]);
-          if (persona.length > 0) {
-            await connection.query(`
-              UPDATE TBL_PERSONAS SET
-                DNI_PERSONA = COALESCE(?, DNI_PERSONA),
-                ID_CONDOMINIO = COALESCE(?, ID_CONDOMINIO),
-                ID_ESTADO_PERSONA = COALESCE(?, ID_ESTADO_PERSONA)
-              WHERE ID_USUARIO = ?;
-            `, [DNI_PERSONA, ID_CONDOMINIO, ID_ESTADO_USUARIO, id]);
+        // Obtener rol actual o actualizado
+        let currentRol = ID_ROL !== undefined ? Number(ID_ROL) : null;
+        if (currentRol === null) {
+          const [uRow] = await connection.query('SELECT ID_ROL FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?', [id]);
+          currentRol = uRow[0]?.ID_ROL || 2;
+        }
+
+        const isGuardia = (currentRol === 3);
+
+        // Consultar persona actual
+        const [existingPersona] = await connection.query(
+          'SELECT ID_PERSONA, ID_CONTACTO, ID_CONDOMINIO, ID_PADRE, ID_PARENTESCO, ID_NACIONALIDAD FROM TBL_PERSONAS WHERE ID_USUARIO = ?',
+          [id]
+        );
+
+        let finalCondominio;
+        let finalParentesco;
+        let finalPadre;
+
+        if (isGuardia) {
+          finalCondominio = null;
+          finalParentesco = null;
+          finalPadre = null;
+        } else {
+          finalCondominio = ID_CONDOMINIO !== undefined 
+            ? (ID_CONDOMINIO ? Number(ID_CONDOMINIO) : null) 
+            : (existingPersona[0]?.ID_CONDOMINIO || null);
+
+          finalParentesco = ID_PARENTESCO !== undefined 
+            ? (ID_PARENTESCO ? Number(ID_PARENTESCO) : null) 
+            : (existingPersona[0]?.ID_PARENTESCO || null);
+
+          if (ID_PADRE !== undefined) {
+            const quiereSerPadre = (ID_PADRE === 1 || ID_PADRE === '1' || ID_PADRE === true);
+            if (quiereSerPadre && finalCondominio) {
+              // Regla de negocio: unicidad de ID_PADRE por casa
+              await connection.query(
+                'UPDATE TBL_PERSONAS SET ID_PADRE = NULL WHERE ID_CONDOMINIO = ? AND ID_USUARIO != ?',
+                [finalCondominio, id]
+              );
+              finalPadre = 1;
+            } else {
+              finalPadre = null;
+            }
           } else {
-            await connection.query(`
-              INSERT INTO TBL_PERSONAS (ID_USUARIO, DNI_PERSONA, ID_CONDOMINIO, ID_ESTADO_PERSONA)
-              VALUES (?, ?, ?, ?);
-            `, [id, DNI_PERSONA || null, ID_CONDOMINIO || null, ID_ESTADO_USUARIO || 1]);
+            finalPadre = existingPersona[0]?.ID_PADRE ?? null;
           }
+        }
+
+        // Manejo de Contacto (TBL_CONTACTOS)
+        let contactoId = existingPersona[0]?.ID_CONTACTO || null;
+        if (CONTACTO !== undefined) {
+          const contactoTexto = CONTACTO ? String(CONTACTO).trim() : '';
+          const tipoContactoId = Number(ID_TIPO_CONTACTO) || 1;
+
+          if (contactoTexto !== '') {
+            if (contactoId) {
+              await connection.query(
+                'UPDATE TBL_CONTACTOS SET ID_TIPO_CONTACTO = ?, DESCRIPCION = ? WHERE ID_CONTACTO = ?',
+                [tipoContactoId, contactoTexto, contactoId]
+              );
+            } else {
+              const [ctResult] = await connection.query(
+                'INSERT INTO TBL_CONTACTOS (ID_TIPO_CONTACTO, DESCRIPCION) VALUES (?, ?)',
+                [tipoContactoId, contactoTexto]
+              );
+              contactoId = ctResult.insertId;
+            }
+          }
+        }
+
+        // Manejo de Documentos de Identidad según nacionalidad
+        const nacionalidadId = ID_NACIONALIDAD !== undefined 
+          ? Number(ID_NACIONALIDAD) 
+          : (existingPersona[0]?.ID_NACIONALIDAD || 1);
+
+        let dniVal = DNI_PERSONA !== undefined ? (DNI_PERSONA ? String(DNI_PERSONA).trim() : null) : undefined;
+        let carnetVal = NUM_CARNET_EXTRANJERO !== undefined ? (NUM_CARNET_EXTRANJERO ? String(NUM_CARNET_EXTRANJERO).trim() : null) : undefined;
+
+        if (nacionalidadId === 2) {
+          if (carnetVal === undefined && dniVal !== undefined) {
+            carnetVal = dniVal;
+            dniVal = null;
+          } else if (carnetVal !== undefined) {
+            dniVal = null;
+          }
+        } else if (nacionalidadId === 1) {
+          carnetVal = null;
+        }
+
+        if (existingPersona.length > 0) {
+          await connection.query(`
+            UPDATE TBL_PERSONAS SET
+              DNI_PERSONA = CASE WHEN ? IS NOT NULL THEN ? ELSE DNI_PERSONA END,
+              NUM_CARNET_EXTRANJERO = CASE WHEN ? IS NOT NULL THEN ? ELSE NUM_CARNET_EXTRANJERO END,
+              ID_NACIONALIDAD = COALESCE(?, ID_NACIONALIDAD),
+              ID_CONDOMINIO = ?,
+              ID_PARENTESCO = ?,
+              ID_PADRE = ?,
+              ID_CONTACTO = COALESCE(?, ID_CONTACTO),
+              ID_ESTADO_PERSONA = COALESCE(?, ID_ESTADO_PERSONA)
+            WHERE ID_USUARIO = ?;
+          `, [
+            dniVal !== undefined ? 1 : null, dniVal,
+            carnetVal !== undefined ? 1 : null, carnetVal,
+            nacionalidadId,
+            finalCondominio,
+            finalParentesco,
+            finalPadre,
+            contactoId,
+            ID_ESTADO_USUARIO,
+            id
+          ]);
+        } else {
+          await connection.query(`
+            INSERT INTO TBL_PERSONAS (
+              ID_USUARIO,
+              DNI_PERSONA,
+              NUM_CARNET_EXTRANJERO,
+              ID_NACIONALIDAD,
+              ID_CONDOMINIO,
+              ID_PARENTESCO,
+              ID_PADRE,
+              ID_CONTACTO,
+              ID_ESTADO_PERSONA
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+          `, [
+            id,
+            dniVal || null,
+            carnetVal || null,
+            nacionalidadId || 1,
+            finalCondominio,
+            finalParentesco || null,
+            finalPadre || null,
+            contactoId,
+            ID_ESTADO_USUARIO || 1
+          ]);
         }
         break;
       }
