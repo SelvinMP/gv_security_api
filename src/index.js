@@ -18,6 +18,9 @@ const reservationRoutes = require('./routes/reservationRoutes');
 const visitorRoutes = require('./routes/visitorRoutes');
 const guardiaRoutes = require('./routes/guardiaRoutes');
 const adminRoutes = require('./routes/adminRoutes');
+const packageRoutes = require('./routes/packageRoutes');
+const eventRoutes = require('./routes/eventRoutes');
+const requestRoutes = require('./routes/requestRoutes');
 
 const app = express();
 
@@ -50,6 +53,9 @@ app.use('/api/reservas', reservationRoutes);
 app.use('/api/visitantes', visitorRoutes);
 app.use('/api/guardia', guardiaRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/paquetes', packageRoutes);
+app.use('/api/eventos', eventRoutes);
+app.use('/api/solicitudes', requestRoutes);
 app.use('/api', notificationRoutes);
 // Compatibilidad directa para llamadas móviles sin prefijo /api/auth
 app.use('/', authRoutes);

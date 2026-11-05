@@ -1,6 +1,12 @@
 const { mysqlPool } = require('../config/db');
 const moment = require('moment-timezone');
-const QRCode = require('qrcode');
+const { buildEncryptedQR, QR_TYPES } = require('../utils/qrCrypto');
+
+// Cantidad de personas: respeta el valor enviado (incluido el cambio de acompañantes)
+const parsePersonas = (value, fallback) => {
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) && n > 0 ? n : (Number(fallback) > 0 ? Number(fallback) : 1);
+};
 
 const registerVisit = async (req, res) => {
   const {
@@ -85,7 +91,7 @@ const registerVisit = async (req, res) => {
       isRecurrent: isRecurrentVisitor
     };
 
-    const qrUrl = await QRCode.toDataURL(JSON.stringify(qrData));
+    const { qrCode: qrUrl } = await buildEncryptedQR(isRecurrentVisitor ? QR_TYPES.RECURRENTE : QR_TYPES.VISITA, ID_VISITANTE);
 
     res.status(201).json({
       success: true,
@@ -223,7 +229,7 @@ const regenerateVisit = async (req, res) => {
       const formattedExpiry = moment(newExpiry).format("YYYY-MM-DD HH:mm:ss");
       await connection.query(
         "UPDATE TBL_VISITANTES_RECURRENTES SET FECHA_VENCIMIENTO = ?, NUM_PERSONAS = ?, NUM_PLACA = ?, ESTADO_QR = 0, NOTA = ? WHERE ID_VISITANTES_RECURRENTES = ?",
-        [formattedExpiry, numPersonas || originalVisit.NUM_PERSONAS, numPlaca || originalVisit.NUM_PLACA, nota !== undefined ? nota : originalVisit.NOTA, id]
+        [formattedExpiry, parsePersonas(numPersonas, originalVisit.NUM_PERSONAS), numPlaca || originalVisit.NUM_PLACA, nota !== undefined && nota !== '' ? nota : originalVisit.NOTA, id]
       );
       
       const [visitor] = await connection.query("SELECT * FROM TBL_VISITANTES_RECURRENTES WHERE ID_VISITANTES_RECURRENTES = ?", [id]);
@@ -244,12 +250,13 @@ const regenerateVisit = async (req, res) => {
         Condominio: resInfo.ID_CONDOMINIO,
         NOMBRE_VISITANTE: v.NOMBRE_VISITANTE,
         DNI_VISITANTE: v.DNI_VISITANTE || v.NUM_CARNET_EXTRANJERO,
-        NUM_PERSONAS: numPersonas || v.NUM_PERSONAS,
+        NUM_PERSONAS: v.NUM_PERSONAS,
         NUM_PLACA: numPlaca || (v.NUM_PLACA || ''),
+        NOTA: v.NOTA,
         FECHA_VENCIMIENTO: formattedExpiry,
         isRecurrent: true
       };
-      const qrUrl = await QRCode.toDataURL(JSON.stringify(qrData));
+      const { qrCode: qrUrl } = await buildEncryptedQR(QR_TYPES.RECURRENTE, id);
 
       res.json({ success: true, message: "QR Recurrente renovado", qrCode: qrUrl, qrData });
     } else {
@@ -262,8 +269,19 @@ const regenerateVisit = async (req, res) => {
       
       const [result] = await connection.query(
         "INSERT INTO TBL_REGVISITAS (ID_USUARIO, NOMBRE_VISITANTE, ID_NACIONALIDAD, DNI_VISITANTE, NUM_CARNET_EXTRANJERO, NUM_PERSONAS, NUM_PLACA, NOTA, FECHA_HORA, ESTADO_QR) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
-        [v.ID_USUARIO, v.NOMBRE_VISITANTE, v.ID_NACIONALIDAD, v.DNI_VISITANTE, v.NUM_CARNET_EXTRANJERO, numPersonas || v.NUM_PERSONAS, numPlaca || (v.NUM_PLACA || ''), nota !== undefined ? nota : v.NOTA, now]
+        [v.ID_USUARIO, v.NOMBRE_VISITANTE, v.ID_NACIONALIDAD, v.DNI_VISITANTE, v.NUM_CARNET_EXTRANJERO, parsePersonas(numPersonas, v.NUM_PERSONAS), numPlaca || (v.NUM_PLACA || ''), nota !== undefined && nota !== '' ? nota : v.NOTA, now]
       );
+      const nuevasPersonas = parsePersonas(numPersonas, v.NUM_PERSONAS);
+      const nuevaNota = nota !== undefined && nota !== '' ? nota : v.NOTA;
+
+      // La nueva visita también debe existir en la bitácora para que el guardia registre el acceso
+      const [personaRows] = await connection.query("SELECT ID_PERSONA FROM TBL_PERSONAS WHERE ID_USUARIO = ?", [v.ID_USUARIO]);
+      if (personaRows.length > 0) {
+        await connection.query(
+          "INSERT INTO TBL_BITACORA_VISITA (ID_PERSONA, ID_VISITANTE, NUM_PERSONA, NUM_PLACA, NOTA, FECHA_HORA) VALUES (?, ?, ?, ?, ?, ?)",
+          [personaRows[0].ID_PERSONA, result.insertId, nuevasPersonas, numPlaca || (v.NUM_PLACA || null), nuevaNota, now]
+        );
+      }
       
       // Get Resident Info for QR
       const [residente] = await connection.query(
@@ -280,12 +298,13 @@ const regenerateVisit = async (req, res) => {
         Condominio: resInfo.ID_CONDOMINIO,
         NOMBRE_VISITANTE: v.NOMBRE_VISITANTE,
         DNI_VISITANTE: v.DNI_VISITANTE || v.NUM_CARNET_EXTRANJERO,
-        NUM_PERSONAS: numPersonas || v.NUM_PERSONAS,
+        NUM_PERSONAS: nuevasPersonas,
         NUM_PLACA: numPlaca || (v.NUM_PLACA || ''),
+        NOTA: nuevaNota,
         FECHA_VENCIMIENTO: null,
         isRecurrent: false
       };
-      const qrUrl = await QRCode.toDataURL(JSON.stringify(qrData));
+      const { qrCode: qrUrl } = await buildEncryptedQR(QR_TYPES.VISITA, result.insertId);
 
       res.json({ success: true, message: "Nueva visita generada", qrCode: qrUrl, qrData });
     }
@@ -320,7 +339,7 @@ const convertToRecurrent = async (req, res) => {
     
     const [result] = await connection.query(insertQuery, [
       v.ID_USUARIO, v.NOMBRE_VISITANTE, v.ID_NACIONALIDAD, v.DNI_VISITANTE, 
-      v.NUM_CARNET_EXTRANJERO, numPersonas || v.NUM_PERSONAS, v.NUM_PLACA, nota !== undefined ? nota : v.NOTA, fechaHoraStr, formattedExpiry
+      v.NUM_CARNET_EXTRANJERO, parsePersonas(numPersonas, v.NUM_PERSONAS), v.NUM_PLACA, nota !== undefined && nota !== '' ? nota : v.NOTA, fechaHoraStr, formattedExpiry
     ]);
 
     const newRecurrentId = result.insertId;
@@ -349,15 +368,14 @@ const convertToRecurrent = async (req, res) => {
       Condominio: resInfo.ID_CONDOMINIO,
       NOMBRE_VISITANTE: v.NOMBRE_VISITANTE,
       DNI_VISITANTE: v.DNI_VISITANTE || v.NUM_CARNET_EXTRANJERO,
-      NUM_PERSONAS: v.NUM_PERSONAS,
+      NUM_PERSONAS: parsePersonas(numPersonas, v.NUM_PERSONAS),
       NUM_PLACA: v.NUM_PLACA,
+      NOTA: nota !== undefined && nota !== '' ? nota : v.NOTA,
       FECHA_VENCIMIENTO: formattedExpiry,
       isRecurrent: true
     };
 
-    // Note: The QR generation here will use the old simple format for now. 
-    // The frontend QRCard will be updated to display the NEW design.
-    const qrUrl = await QRCode.toDataURL(JSON.stringify(qrData));
+    const { qrCode: qrUrl } = await buildEncryptedQR(QR_TYPES.RECURRENTE, newRecurrentId);
 
     res.json({ 
       success: true, 
@@ -460,7 +478,25 @@ const updateRecurrentVisitExpiry = async (req, res) => {
   }
 };
 
+/**
+ * Carnet QR del residente (cifrado). Reemplaza el QR en texto plano que antes
+ * se generaba en el navegador mediante un servicio externo.
+ * GET /api/visitantes/resident-qr
+ */
+const getResidentQR = async (req, res) => {
+  const usuarioId = req.user?.id;
+  if (!usuarioId) return res.status(401).json({ message: 'Sesión no válida' });
+  try {
+    const { qrCode } = await buildEncryptedQR(QR_TYPES.RESIDENTE, usuarioId);
+    res.json({ success: true, qrCode });
+  } catch (error) {
+    console.error("Error generating resident QR:", error);
+    res.status(500).json({ message: "Error al generar el QR de residente" });
+  }
+};
+
 module.exports = { 
+  getResidentQR,
   registerVisit, 
   validateQR, 
   getVisitorHistory, 
