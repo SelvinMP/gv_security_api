@@ -3,7 +3,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const moment = require('moment-timezone');
 const admin = require('firebase-admin');
-const transporter = require('../config/transporter');
+const { sendMailWithTimeout } = require('../config/transporter');
 
 const SECRET_KEY = process.env.SECRET_KEY || 'your_secret_key';
 
@@ -544,7 +544,7 @@ const confirmEntry = async (req, res) => {
                 <p>Por favor tome sus precauciones. Si necesita más información consulte con seguridad al llamar a caseta.</p>
               </div>`
           };
-          transporter.sendMail(mailOptions).catch(err => console.log('Error enviando correo de motivo:', err));
+          sendMailWithTimeout(mailOptions).catch(err => console.log('Error enviando correo de motivo:', err));
         }
       }
     } catch (notifErr) {
