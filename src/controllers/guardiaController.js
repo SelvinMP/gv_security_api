@@ -631,11 +631,329 @@ const getResidentDetails = async (req, res) => {
   }
 };
 
+// ============================================================================
+//  ESCANEO DE QR CIFRADO (GVS1.*) - Visitas, recurrentes, paquetes, QR múltiple
+//  y carnet de residente. El QR solo contiene un token AES-256-GCM; los datos
+//  se obtienen de la base de datos después de descifrarlo aquí en el servidor.
+// ============================================================================
+const { decryptQRPayload, QR_TYPES } = require('../utils/qrCrypto');
+const { notifyUser, buildEmailHtml } = require('../utils/notify');
+const { getPackageWithDetails } = require('./packageController');
+const { getEventWithGuests, getEventEnd } = require('./eventController');
+
+const TZ_HN = 'America/Tegucigalpa';
+
+const queryVisit = async (connection, id, isRecurrent) => {
+  if (isRecurrent) {
+    const [rows] = await connection.query(`
+      SELECT v.ID_VISITANTES_RECURRENTES as id, v.NOMBRE_VISITANTE, v.DNI_VISITANTE, v.NUM_CARNET_EXTRANJERO,
+             v.ID_NACIONALIDAD, v.NUM_PERSONAS, v.NUM_PLACA, v.FECHA_HORA, v.FECHA_VENCIMIENTO, v.ESTADO_QR,
+             v.NOTA, v.ID_USUARIO, u.NOMBRE_USUARIO as RESIDENTE, c.DESCRIPCION as CASA_DESTINO
+        FROM TBL_VISITANTES_RECURRENTES v
+        JOIN TBL_MS_USUARIO u ON v.ID_USUARIO = u.ID_USUARIO
+        LEFT JOIN TBL_PERSONAS p ON p.ID_USUARIO = v.ID_USUARIO
+        LEFT JOIN TBL_CONDOMINIOS c ON c.ID_CONDOMINIO = p.ID_CONDOMINIO
+       WHERE v.ID_VISITANTES_RECURRENTES = ?`, [id]);
+    if (rows.length === 0) return { status: 404, message: 'No se encontró información para este código QR.' };
+    if (moment().isAfter(moment(rows[0].FECHA_VENCIMIENTO))) {
+      return { status: 400, message: 'La fecha de validez de este código QR de visita recurrente ya venció o caducó.' };
+    }
+    return { data: rows[0] };
+  }
+  const [rows] = await connection.query(`
+    SELECT v.ID_VISITANTE as id, v.NOMBRE_VISITANTE, v.DNI_VISITANTE, v.NUM_CARNET_EXTRANJERO, v.ID_NACIONALIDAD,
+           v.NUM_PERSONAS, v.NUM_PLACA, v.FECHA_HORA, v.ESTADO_QR, v.NOTA, v.ID_USUARIO,
+           u.NOMBRE_USUARIO as RESIDENTE, c.DESCRIPCION as CASA_DESTINO
+      FROM TBL_REGVISITAS v
+      JOIN TBL_MS_USUARIO u ON v.ID_USUARIO = u.ID_USUARIO
+      LEFT JOIN TBL_PERSONAS p ON p.ID_USUARIO = v.ID_USUARIO
+      LEFT JOIN TBL_CONDOMINIOS c ON c.ID_CONDOMINIO = p.ID_CONDOMINIO
+     WHERE v.ID_VISITANTE = ?`, [id]);
+  if (rows.length === 0) return { status: 404, message: 'No se encontró información para este código QR.' };
+  if (rows[0].ESTADO_QR === 1) return { status: 400, message: 'Este código QR de ingreso único ya fue utilizado o escaneado anteriormente.' };
+  return { data: rows[0] };
+};
+
+const queryResident = async (connection, usuarioId) => {
+  const [rows] = await connection.query(`
+    SELECT u.NOMBRE_USUARIO, p.DNI_PERSONA, p.NUM_CARNET_EXTRANJERO, c.DESCRIPCION as CONDOMINIO,
+           ep.DESCRIPCION as ESTADO_RESIDENTE, p.ID_ESTADO_PERSONA
+      FROM TBL_MS_USUARIO u
+      LEFT JOIN TBL_PERSONAS p ON p.ID_USUARIO = u.ID_USUARIO
+      LEFT JOIN TBL_CONDOMINIOS c ON c.ID_CONDOMINIO = p.ID_CONDOMINIO
+      LEFT JOIN TBL_ESTADO_PERSONA ep ON ep.ID_ESTADO_PERSONA = p.ID_ESTADO_PERSONA
+     WHERE u.ID_USUARIO = ?`, [usuarioId]);
+  if (rows.length === 0) return { status: 404, message: 'No se encontró información para este usuario residente.' };
+  const resident = rows[0];
+  if (resident.ID_ESTADO_PERSONA !== 1) {
+    return { data: { ID_ESTADO_PERSONA: resident.ID_ESTADO_PERSONA, ESTADO_RESIDENTE: resident.ESTADO_RESIDENTE || 'DESCONOCIDO' } };
+  }
+  return { data: resident };
+};
+
+const queryPackage = async (connection, id) => {
+  const paquete = await getPackageWithDetails(connection, id);
+  if (!paquete) return { status: 404, message: 'No se encontró información para este código QR de paquete.' };
+  if (Number(paquete.ESTADO_QR) === 1) {
+    return { status: 400, message: `Este paquete ya fue recibido en caseta el ${moment(paquete.FECHA_RECEPCION).format('DD/MM/YYYY hh:mm a')}.` };
+  }
+  const [res] = await connection.query('SELECT NOMBRE_USUARIO FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?', [paquete.ID_USUARIO]);
+  return {
+    data: {
+      id: paquete.ID_PAQUETE,
+      RESIDENTE: res[0]?.NOMBRE_USUARIO,
+      CASA_DESTINO: paquete.CASA,
+      REMITENTE: paquete.REMITENTE,
+      TIPO_REMITENTE: paquete.TIPO_REMITENTE,
+      TAMANO: paquete.TAMANO,
+      DIMENSIONES_MAXIMAS: paquete.DIMENSIONES_MAXIMAS,
+      PERMITIDO: paquete.PERMITIDO,
+      FECHA_ESTIMADA_ENTREGA: paquete.FECHA_ESTIMADA_ENTREGA,
+      DESCRIPCION: paquete.DESCRIPCION
+    }
+  };
+};
+
+/** Valida que el QR múltiple se use solo el día de la reunión y antes de que termine. */
+const validateEventWindow = (evento, payloadDate) => {
+  const hoy = moment().tz(TZ_HN).format('YYYY-MM-DD');
+  const fechaEvento = moment(evento.FECHA_EVENTO).format('YYYY-MM-DD');
+  if (payloadDate && payloadDate !== fechaEvento) {
+    return 'Este QR corresponde a una versión anterior de la reunión. Solicite al residente el QR actualizado.';
+  }
+  if (fechaEvento !== hoy) {
+    return `Este QR múltiple solo es válido el día de la reunión (${moment(fechaEvento).format('DD/MM/YYYY')}). No puede reutilizarse en otra fecha.`;
+  }
+  if (getEventEnd(evento).isBefore(moment().tz(TZ_HN))) {
+    return 'La reunión ya finalizó; el QR múltiple venció.';
+  }
+  return null;
+};
+
+const queryEvent = async (connection, id, payloadDate) => {
+  const evento = await getEventWithGuests(connection, id);
+  if (!evento) return { status: 404, message: 'No se encontró información para este QR múltiple.' };
+  const invalid = validateEventWindow(evento, payloadDate);
+  if (invalid) return { status: 400, message: invalid };
+  return {
+    data: {
+      id: evento.ID_EVENTO_VISITA,
+      TITULO: evento.TITULO,
+      RESIDENTE: evento.RESIDENTE,
+      CASA_DESTINO: evento.CASA,
+      FECHA_EVENTO: moment(evento.FECHA_EVENTO).format('YYYY-MM-DD'),
+      HORA_INICIO: String(evento.HORA_INICIO).slice(0, 5),
+      HORA_FIN: String(evento.HORA_FIN).slice(0, 5),
+      OBSERVACIONES_RESIDENTE: evento.OBSERVACIONES_RESIDENTE,
+      OBSERVACIONES_GUARDIA: evento.OBSERVACIONES_GUARDIA,
+      invitados: evento.invitados
+    }
+  };
+};
+
+/**
+ * POST /api/guardia/scan
+ * body: { qr, latitud, longitud, precision }
+ * Respuesta: { kind: 'visit'|'recurrent'|'package'|'event'|'resident', data, geocerca }
+ */
+const scanQR = async (req, res) => {
+  const { qr, latitud, longitud, precision } = req.body || {};
+  const guardiaId = getGuardiaIdFromReq(req);
+  const payload = decryptQRPayload(qr);
+
+  if (!payload) {
+    return res.status(400).json({
+      message: 'Código QR no válido, alterado o de una versión anterior. Solicite al residente que genere o actualice el QR desde la app.'
+    });
+  }
+
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+
+    const geoValidation = await checkGeocerca(connection, {
+      latitud, longitud, precision, guardiaId,
+      idVisitante: payload.t === QR_TYPES.VISITA ? payload.id : null,
+      idVisitanteRecurrente: payload.t === QR_TYPES.RECURRENTE ? payload.id : null,
+      req
+    });
+    if (!geoValidation.allowed) {
+      return res.status(403).json({
+        message: geoValidation.message, geocercaError: true,
+        distancia: geoValidation.distancia, radio: geoValidation.radio, zona: geoValidation.zona
+      });
+    }
+
+    let result;
+    let kind;
+    switch (payload.t) {
+      case QR_TYPES.VISITA: kind = 'visit'; result = await queryVisit(connection, payload.id, false); break;
+      case QR_TYPES.RECURRENTE: kind = 'recurrent'; result = await queryVisit(connection, payload.id, true); break;
+      case QR_TYPES.PAQUETE: kind = 'package'; result = await queryPackage(connection, payload.id); break;
+      case QR_TYPES.EVENTO: kind = 'event'; result = await queryEvent(connection, payload.id, payload.d); break;
+      case QR_TYPES.RESIDENTE: kind = 'resident'; result = await queryResident(connection, payload.id); break;
+      default: return res.status(400).json({ message: 'Tipo de código QR no reconocido.' });
+    }
+
+    if (result.status) return res.status(result.status).json({ message: result.message });
+    return res.status(200).json({ kind, isRecurrent: kind === 'recurrent', data: result.data, geocerca: geoValidation });
+  } catch (error) {
+    console.error('Error en scanQR:', error);
+    res.status(500).json({ message: 'Error al validar el código QR' });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+const ESTADOS_PAQUETE = ['INTACTO', 'ROTO', 'APLASTADO', 'MOJADO', 'ABIERTO', 'OTRO'];
+
+/**
+ * POST /api/guardia/paquetes/:id/recibir
+ * body: { estadoPaquete, observaciones, cumpleDimensiones, idGeocerca, latitud, longitud }
+ */
+const receivePackage = async (req, res) => {
+  const { id } = req.params;
+  const { estadoPaquete, observaciones, cumpleDimensiones, idGeocerca, latitud, longitud } = req.body || {};
+  const guardiaId = getGuardiaIdFromReq(req);
+  const estado = String(estadoPaquete || '').toUpperCase();
+
+  if (!ESTADOS_PAQUETE.includes(estado)) return res.status(400).json({ message: 'Seleccione el estado en que se recibe el paquete.' });
+  if (cumpleDimensiones !== true) return res.status(400).json({ message: 'Solo se reciben paquetes que cumplan las dimensiones permitidas (pequeño o mediano).' });
+  if (estado === 'OTRO' && !String(observaciones || '').trim()) return res.status(400).json({ message: 'Describa el estado del paquete en observaciones.' });
+
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const paquete = await getPackageWithDetails(connection, id);
+    if (!paquete) return res.status(404).json({ message: 'Paquete no encontrado' });
+    if (Number(paquete.ESTADO_QR) === 1) return res.status(400).json({ message: 'Este paquete ya fue recibido.' });
+    if (Number(paquete.PERMITIDO) !== 1) return res.status(400).json({ message: 'El tamaño de este paquete no está permitido en caseta.' });
+
+    const now = moment().tz(TZ_HN).format('YYYY-MM-DD HH:mm:ss');
+    const obs = String(observaciones || '').trim().slice(0, 2000) || null;
+    const [upd] = await connection.query(
+      `UPDATE TBL_PAQUETES
+          SET ESTADO_QR = 1, FECHA_RECEPCION = ?, ID_USUARIO_GUARDIA = ?, ID_GEOCERCA = ?,
+              ESTADO_PAQUETE = ?, OBSERVACIONES_GUARDIA = ?, LATITUD_ESCANEO = ?, LONGITUD_ESCANEO = ?
+        WHERE ID_PAQUETE = ? AND ESTADO_QR = 0`,
+      [now, guardiaId || null, idGeocerca || null, estado, obs, latitud || null, longitud || null, id]
+    );
+    if (upd.affectedRows === 0) return res.status(400).json({ message: 'Este paquete ya fue recibido.' });
+
+    const fechaTxt = moment(now).format('DD/MM/YYYY hh:mm a');
+    await notifyUser(connection, paquete.ID_USUARIO, {
+      title: 'Paquete recibido en caseta',
+      message: `Su paquete de ${paquete.REMITENTE} fue recibido el ${fechaTxt}. Estado: ${estado}${obs ? ` (${obs})` : ''}.`,
+      emailSubject: `Paquete recibido: ${paquete.REMITENTE}`,
+      emailHtml: buildEmailHtml(
+        'Paquete recibido en caseta',
+        'Le informamos que la caseta de seguridad recibió el siguiente paquete autorizado por usted:',
+        [
+          { label: 'Remitente', value: paquete.REMITENTE },
+          { label: 'Casa', value: paquete.CASA },
+          { label: 'Tamaño', value: paquete.TAMANO },
+          { label: 'Fecha y hora', value: fechaTxt },
+          { label: 'Estado', value: estado },
+          { label: 'Observaciones', value: obs }
+        ],
+        'Puede pasar a retirarlo en la caseta de seguridad.'
+      )
+    });
+
+    res.json({ success: true, message: 'Paquete recibido y residente notificado' });
+  } catch (error) {
+    console.error('Error receivePackage:', error);
+    res.status(500).json({ message: 'Error al registrar la recepción del paquete' });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+/**
+ * POST /api/guardia/eventos/:id/ingreso
+ * body: { invitados: [ID_EVENTO_INVITADO...], observaciones, todosCoinciden, idGeocerca }
+ * Marca cada visitante como "ingresado" y envía correo al residente.
+ */
+const checkInEventGuests = async (req, res) => {
+  const { id } = req.params;
+  const { invitados, observaciones, todosCoinciden, idGeocerca } = req.body || {};
+  const guardiaId = getGuardiaIdFromReq(req);
+  const ids = Array.isArray(invitados) ? invitados.map(Number).filter(Boolean) : [];
+
+  if (ids.length === 0) return res.status(400).json({ message: 'Seleccione al menos un visitante que está ingresando.' });
+  if (todosCoinciden !== true) return res.status(400).json({ message: 'Debe confirmar que los visitantes coinciden con la lista autorizada.' });
+
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const evento = await getEventWithGuests(connection, id);
+    if (!evento) return res.status(404).json({ message: 'Reunión no encontrada' });
+    const invalid = validateEventWindow(evento, null);
+    if (invalid) return res.status(400).json({ message: invalid });
+
+    const pendientes = evento.invitados.filter(i => ids.includes(Number(i.ID_EVENTO_INVITADO)) && Number(i.INGRESADO) !== 1);
+    if (pendientes.length === 0) return res.status(400).json({ message: 'Los visitantes seleccionados ya fueron registrados o no pertenecen a esta lista.' });
+
+    const now = moment().tz(TZ_HN).format('YYYY-MM-DD HH:mm:ss');
+    const obs = String(observaciones || '').trim().slice(0, 1000);
+
+    await connection.beginTransaction();
+    await connection.query(
+      `UPDATE TBL_EVENTO_INVITADOS SET INGRESADO = 1, FECHA_INGRESO = ?, ID_USUARIO_GUARDIA = ?
+        WHERE ID_EVENTO_VISITA = ? AND INGRESADO = 0 AND ID_EVENTO_INVITADO IN (?)`,
+      [now, guardiaId || null, id, pendientes.map(p => p.ID_EVENTO_INVITADO)]
+    );
+    const totalIngresados = evento.invitados.filter(i => Number(i.INGRESADO) === 1).length + pendientes.length;
+    const nuevoEstado = totalIngresados >= evento.invitados.length ? 2 : 1;
+    const notaGuardia = obs ? `[${moment(now).format('DD/MM/YYYY hh:mm a')}] ${obs}` : null;
+    await connection.query(
+      `UPDATE TBL_EVENTOS_VISITA
+          SET ESTADO_QR = ?, ID_USUARIO_GUARDIA = ?, ID_GEOCERCA = COALESCE(?, ID_GEOCERCA),
+              OBSERVACIONES_GUARDIA = CASE WHEN ? IS NULL THEN OBSERVACIONES_GUARDIA
+                                           ELSE CONCAT_WS('\n', OBSERVACIONES_GUARDIA, ?) END
+        WHERE ID_EVENTO_VISITA = ?`,
+      [nuevoEstado, guardiaId || null, idGeocerca || null, notaGuardia, notaGuardia, id]
+    );
+    await connection.commit();
+
+    const nombres = pendientes.map(p => p.NOMBRE_COMPLETO);
+    const horaTxt = moment(now).format('hh:mm a');
+    await notifyUser(connection, evento.ID_USUARIO, {
+      title: 'Su visita llegó',
+      message: `${nombres.join(', ')} ingresaron a las ${horaTxt} (${evento.TITULO}). ${totalIngresados}/${evento.invitados.length} visitantes han llegado.${obs ? ` Observación del guardia: ${obs}` : ''}`,
+      emailSubject: `Su visita llegó - ${evento.TITULO}`,
+      emailHtml: buildEmailHtml(
+        'Su visita llegó',
+        `La caseta de seguridad registró el ingreso de visitantes de su reunión "${evento.TITULO}".`,
+        [
+          { label: 'Ingresaron', value: nombres.join(', ') },
+          { label: 'Hora de ingreso', value: horaTxt },
+          { label: 'Casa', value: evento.CASA },
+          { label: 'Llegadas', value: `${totalIngresados} de ${evento.invitados.length} autorizados` },
+          { label: 'Observación del guardia', value: obs }
+        ]
+      )
+    });
+
+    const actualizado = await getEventWithGuests(connection, id);
+    res.json({ success: true, message: `${pendientes.length} visitante(s) registrados`, data: actualizado.invitados });
+  } catch (error) {
+    if (connection) await connection.rollback().catch(() => {});
+    console.error('Error checkInEventGuests:', error);
+    res.status(500).json({ message: 'Error al registrar el ingreso' });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
 module.exports = {
   loginGuardia,
   getVisitDetails,
   getMotivos,
   confirmEntry,
   getResidentDetails,
-  checkGuardiaLocation
+  checkGuardiaLocation,
+  scanQR,
+  receivePackage,
+  checkInEventGuests
 };

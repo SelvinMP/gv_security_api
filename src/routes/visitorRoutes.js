@@ -1,7 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const visitorController = require('../controllers/visitorController');
+const { authenticateToken } = require('../middlewares/authMiddleware');
 
+// Carnet QR cifrado del residente (debe ir antes de '/:type/:id')
+router.get('/resident-qr', authenticateToken, visitorController.getResidentQR);
 router.post('/registrar_visitas', visitorController.registerVisit);
 router.post('/validateQR', visitorController.validateQR);
 router.get('/history/:usuarioId', visitorController.getVisitorHistory);

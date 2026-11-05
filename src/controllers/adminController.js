@@ -364,7 +364,8 @@ const getDashboardStats = async (req, res) => {
 };
 
 /**
- * 2. Obtiene la configuración actual de la Geocerca y los últimos logs de escaneo
+ * 2. Obtiene TODAS las geocercas (portones / entradas), los parámetros globales
+ *    y los últimos logs de escaneo rechazado
  */
 const getGeocercaConfig = async (req, res) => {
   let connection;
@@ -384,8 +385,7 @@ const getGeocercaConfig = async (req, res) => {
         u.NOMBRE_USUARIO AS CREADO_POR_NOMBRE
       FROM TBL_GEOCERCAS g
       LEFT JOIN TBL_MS_USUARIO u ON g.CREADO_POR = u.ID_USUARIO
-      ORDER BY g.ID_GEOCERCA ASC
-      LIMIT 1;
+      ORDER BY g.ID_GEOCERCA ASC;
     `);
 
     const [params] = await connection.query(`
@@ -420,6 +420,8 @@ const getGeocercaConfig = async (req, res) => {
     res.status(200).json({
       success: true,
       data: {
+        geocercas,
+        // Compatibilidad con versiones anteriores del frontend (primera entrada)
         geocerca: geocercas.length > 0 ? geocercas[0] : null,
         parametros: {
           geocerca_activa: paramMap['GEOCERCA_ACTIVA'] === '1',
@@ -437,8 +439,31 @@ const getGeocercaConfig = async (req, res) => {
   }
 };
 
+// Helper: guarda los parámetros globales de geocerca (aplican a TODAS las entradas)
+const saveGeocercaParams = async (connection, userId, { activo, precision_maxima }) => {
+  const upsert = async (parametro, valor) => {
+    const [rows] = await connection.query('SELECT ID_PARAMETRO FROM TBL_MS_PARAMETROS WHERE PARAMETRO = ?', [parametro]);
+    if (rows.length > 0) {
+      await connection.query('UPDATE TBL_MS_PARAMETROS SET VALOR = ?, FECHA_MODIFICACION = NOW() WHERE PARAMETRO = ?', [valor, parametro]);
+    } else {
+      await connection.query('INSERT INTO TBL_MS_PARAMETROS (ID_USUARIO, PARAMETRO, VALOR, FECHA_CREACION) VALUES (?, ?, ?, NOW())', [userId, parametro, valor]);
+    }
+  };
+
+  if (activo !== undefined) {
+    await upsert('GEOCERCA_ACTIVA', activo ? '1' : '0');
+  }
+  if (precision_maxima !== undefined && precision_maxima !== null && precision_maxima !== '') {
+    const prec = parseInt(precision_maxima, 10);
+    if (!isNaN(prec) && prec > 0) await upsert('PRECISION_MAXIMA_GPS_METROS', String(prec));
+  }
+};
+
 /**
- * 3. Actualiza las coordenadas y parámetros de la Geocerca
+ * 3. Crea o actualiza UNA entrada / portón (geocerca)
+ *    - Con id_geocerca  → actualiza esa entrada
+ *    - Sin id_geocerca  → crea una NUEVA entrada
+ *    Además guarda los parámetros globales (activo, precision_maxima) si vienen en el body.
  * ¡REGLA ESTRICTA!: Solo Super Administrador (ID_ROL = 1)
  */
 const updateGeocercaConfig = async (req, res) => {
@@ -456,95 +481,173 @@ const updateGeocercaConfig = async (req, res) => {
     latitud_centro,
     longitud_centro,
     radio_metros,
-    activo,
+    activo,          // Validación global obligatoria (todas las entradas)
+    activo_zona,     // Esta entrada específica habilitada / deshabilitada
     precision_maxima
   } = req.body;
 
-  if (latitud_centro === undefined || longitud_centro === undefined || radio_metros === undefined) {
+  const latNum = parseFloat(latitud_centro);
+  const lngNum = parseFloat(longitud_centro);
+  const radioNum = parseFloat(radio_metros);
+
+  if (isNaN(latNum) || isNaN(lngNum) || isNaN(radioNum)) {
     return res.status(400).json({
       success: false,
       message: 'Latitud, longitud y radio en metros son campos obligatorios.'
     });
   }
+  if (latNum < -90 || latNum > 90 || lngNum < -180 || lngNum > 180 || radioNum <= 0 || radioNum > 1000) {
+    return res.status(400).json({
+      success: false,
+      message: 'Coordenadas o radio fuera de rango (lat ±90, lng ±180, radio 1–1000 m).'
+    });
+  }
+
+  const nombre = String(nombre_zona || '').trim().toUpperCase();
+  if (!nombre) {
+    return res.status(400).json({ success: false, message: 'El nombre de la entrada es obligatorio.' });
+  }
+
+  const activoZonaVal = activo_zona === undefined ? 1 : (activo_zona ? 1 : 0);
 
   let connection;
   try {
     connection = await mysqlPool.getConnection();
     await connection.beginTransaction();
 
-    const latNum = parseFloat(latitud_centro);
-    const lngNum = parseFloat(longitud_centro);
-    const radioNum = parseFloat(radio_metros);
-    const activoVal = activo !== undefined ? (activo ? 1 : 0) : 1;
-    const precisionVal = precision_maxima ? parseInt(precision_maxima, 10) : 40;
+    // Evitar nombres duplicados entre entradas
+    const [dup] = await connection.query(
+      'SELECT ID_GEOCERCA FROM TBL_GEOCERCAS WHERE UPPER(NOMBRE_ZONA) = ? AND ID_GEOCERCA <> ?',
+      [nombre, id_geocerca ? Number(id_geocerca) : 0]
+    );
+    if (dup.length > 0) {
+      await connection.rollback();
+      return res.status(409).json({ success: false, message: `Ya existe una entrada con el nombre "${nombre}".` });
+    }
 
-    if (id_geocerca) {
-      await connection.query(`
+    let idGuardado = id_geocerca ? Number(id_geocerca) : null;
+    let creada = false;
+
+    if (idGuardado) {
+      const [upd] = await connection.query(`
         UPDATE TBL_GEOCERCAS SET
-          NOMBRE_ZONA = COALESCE(?, NOMBRE_ZONA),
-          DESCRIPCION = COALESCE(?, DESCRIPCION),
+          NOMBRE_ZONA = ?,
+          DESCRIPCION = ?,
           LATITUD_CENTRO = ?,
           LONGITUD_CENTRO = ?,
           RADIO_METROS = ?,
           ACTIVO = ?
         WHERE ID_GEOCERCA = ?;
-      `, [nombre_zona || null, descripcion || null, latNum, lngNum, radioNum, activoVal, id_geocerca]);
-    } else {
-      const [existing] = await connection.query('SELECT ID_GEOCERCA FROM TBL_GEOCERCAS LIMIT 1');
-      if (existing.length > 0) {
-        await connection.query(`
-          UPDATE TBL_GEOCERCAS SET
-            NOMBRE_ZONA = COALESCE(?, NOMBRE_ZONA),
-            DESCRIPCION = COALESCE(?, DESCRIPCION),
-            LATITUD_CENTRO = ?,
-            LONGITUD_CENTRO = ?,
-            RADIO_METROS = ?,
-            ACTIVO = ?
-          WHERE ID_GEOCERCA = ?;
-        `, [nombre_zona || null, descripcion || null, latNum, lngNum, radioNum, activoVal, existing[0].ID_GEOCERCA]);
-      } else {
-        await connection.query(`
-          INSERT INTO TBL_GEOCERCAS (NOMBRE_ZONA, DESCRIPCION, LATITUD_CENTRO, LONGITUD_CENTRO, RADIO_METROS, ACTIVO, CREADO_POR)
-          VALUES (?, ?, ?, ?, ?, ?, ?);
-        `, [
-          nombre_zona || 'CASETA PRINCIPAL',
-          descripcion || 'Perímetro autorizado para escaneo de QR',
-          latNum,
-          lngNum,
-          radioNum,
-          activoVal,
-          req.user.id
-        ]);
+      `, [nombre, descripcion || null, latNum, lngNum, radioNum, activoZonaVal, idGuardado]);
+
+      if (upd.affectedRows === 0) {
+        await connection.rollback();
+        return res.status(404).json({ success: false, message: 'La entrada que intenta modificar ya no existe.' });
       }
+    } else {
+      const [ins] = await connection.query(`
+        INSERT INTO TBL_GEOCERCAS (NOMBRE_ZONA, DESCRIPCION, LATITUD_CENTRO, LONGITUD_CENTRO, RADIO_METROS, ACTIVO, CREADO_POR)
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+      `, [
+        nombre,
+        descripcion || 'Perímetro autorizado para escaneo de QR',
+        latNum,
+        lngNum,
+        radioNum,
+        activoZonaVal,
+        req.user.id
+      ]);
+      idGuardado = ins.insertId;
+      creada = true;
     }
 
-    // GEOCERCA_ACTIVA
-    const [pActiva] = await connection.query("SELECT ID_PARAMETRO FROM TBL_MS_PARAMETROS WHERE PARAMETRO = 'GEOCERCA_ACTIVA'");
-    if (pActiva.length > 0) {
-      await connection.query("UPDATE TBL_MS_PARAMETROS SET VALOR = ?, FECHA_MODIFICACION = NOW() WHERE PARAMETRO = 'GEOCERCA_ACTIVA'", [String(activoVal)]);
-    } else {
-      await connection.query("INSERT INTO TBL_MS_PARAMETROS (ID_USUARIO, PARAMETRO, VALOR, FECHA_CREACION) VALUES (?, 'GEOCERCA_ACTIVA', ?, NOW())", [req.user.id, String(activoVal)]);
-    }
-
-    // PRECISION_MAXIMA_GPS_METROS
-    const [pPrec] = await connection.query("SELECT ID_PARAMETRO FROM TBL_MS_PARAMETROS WHERE PARAMETRO = 'PRECISION_MAXIMA_GPS_METROS'");
-    if (pPrec.length > 0) {
-      await connection.query("UPDATE TBL_MS_PARAMETROS SET VALOR = ?, FECHA_MODIFICACION = NOW() WHERE PARAMETRO = 'PRECISION_MAXIMA_GPS_METROS'", [String(precisionVal)]);
-    } else {
-      await connection.query("INSERT INTO TBL_MS_PARAMETROS (ID_USUARIO, PARAMETRO, VALOR, FECHA_CREACION) VALUES (?, 'PRECISION_MAXIMA_GPS_METROS', ?, NOW())", [req.user.id, String(precisionVal)]);
-    }
+    await saveGeocercaParams(connection, req.user.id, { activo, precision_maxima });
 
     await connection.commit();
 
-    res.status(200).json({
+    res.status(creada ? 201 : 200).json({
       success: true,
-      message: 'Coordenadas y parámetros de Geocerca actualizados exitosamente por el Super Administrador.'
+      id_geocerca: idGuardado,
+      message: creada
+        ? `Entrada "${nombre}" registrada exitosamente.`
+        : `Entrada "${nombre}" actualizada exitosamente.`
     });
 
   } catch (error) {
     if (connection) await connection.rollback();
-    console.error('Error al actualizar geocerca:', error);
+    console.error('Error al guardar geocerca:', error);
     res.status(500).json({ success: false, message: 'Error interno al guardar cambios de geocerca.' });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+/**
+ * 3b. Actualiza solo los parámetros globales (validación obligatoria y precisión GPS)
+ * ¡Solo Super Administrador!
+ */
+const updateGeocercaParams = async (req, res) => {
+  if (!req.user || Number(req.user.role) !== 1) {
+    return res.status(403).json({ success: false, message: 'Acceso denegado: Solo el SUPER ADMINISTRADOR puede modificar estos parámetros.' });
+  }
+
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    await connection.beginTransaction();
+    await saveGeocercaParams(connection, req.user.id, {
+      activo: req.body.activo,
+      precision_maxima: req.body.precision_maxima
+    });
+    await connection.commit();
+    res.status(200).json({ success: true, message: 'Parámetros globales de geocerca actualizados.' });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    console.error('Error al actualizar parámetros de geocerca:', error);
+    res.status(500).json({ success: false, message: 'Error interno al guardar parámetros.' });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+/**
+ * 3c. Elimina una entrada / portón.
+ *     Si ya tiene visitas registradas en la bitácora, no se borra (se sugiere desactivarla)
+ *     para no perder la trazabilidad histórica.
+ * ¡Solo Super Administrador!
+ */
+const deleteGeocerca = async (req, res) => {
+  if (!req.user || Number(req.user.role) !== 1) {
+    return res.status(403).json({ success: false, message: 'Acceso denegado: Solo el SUPER ADMINISTRADOR puede eliminar entradas.' });
+  }
+
+  const id = Number(req.params.id);
+  if (!id) return res.status(400).json({ success: false, message: 'ID de entrada inválido.' });
+
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+
+    const [uso] = await connection.query('SELECT COUNT(*) AS total FROM TBL_BITACORA_VISITA WHERE ID_GEOCERCA = ?', [id]);
+    if (uso[0].total > 0) {
+      return res.status(409).json({
+        success: false,
+        message: `Esta entrada tiene ${uso[0].total} visita(s) registradas en la bitácora. Para conservar el historial, desactívela en lugar de eliminarla.`
+      });
+    }
+
+    const [del] = await connection.query('DELETE FROM TBL_GEOCERCAS WHERE ID_GEOCERCA = ?', [id]);
+    if (del.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'La entrada no existe.' });
+    }
+
+    res.status(200).json({ success: true, message: 'Entrada eliminada exitosamente.' });
+  } catch (error) {
+    if (error && (error.code === 'ER_ROW_IS_REFERENCED_2' || error.code === 'ER_ROW_IS_REFERENCED')) {
+      return res.status(409).json({ success: false, message: 'La entrada está referenciada por otros registros. Desactívela en lugar de eliminarla.' });
+    }
+    console.error('Error al eliminar geocerca:', error);
+    res.status(500).json({ success: false, message: 'Error interno al eliminar la entrada.' });
   } finally {
     if (connection) connection.release();
   }
@@ -1927,6 +2030,8 @@ module.exports = {
   getDashboardStats,
   getGeocercaConfig,
   updateGeocercaConfig,
+  updateGeocercaParams,
+  deleteGeocerca,
   getFormOptions,
   getMaintenanceTable,
   createMaintenanceRecord,
