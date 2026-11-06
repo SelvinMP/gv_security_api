@@ -1,6 +1,7 @@
 const { mysqlPool } = require('../config/db');
 const bcrypt = require('bcrypt');
 const moment = require('moment-timezone');
+const catalogs = require('../utils/catalogs');
 
 /**
  * 1. Obtiene métricas y estadísticas consolidadas para el Dashboard Administrativo
@@ -714,6 +715,9 @@ const getFormOptions = async (req, res) => {
  * 5. Obtiene los registros de las Tablas de Mantenimiento con campos limpios y sin exponer ID al usuario
  */
 const getMaintenanceTable = async (req, res) => {
+  // Catálogos simples (motivos, parentescos, tipos, tamaños...)
+  if (catalogs.isCatalog(req.params.table)) return catalogs.listCatalog(req, res);
+
   const { table } = req.params;
   let connection;
 
@@ -1017,6 +1021,9 @@ const getMaintenanceTable = async (req, res) => {
  * 6. CREAR (INSERT) registro nuevo en tabla de mantenimiento
  */
 const createMaintenanceRecord = async (req, res) => {
+  // Catálogos simples (motivos, parentescos, tipos, tamaños...)
+  if (catalogs.isCatalog(req.params.table)) return catalogs.createCatalog(req, res);
+
   const { table } = req.params;
   const data = req.body;
 
@@ -1288,6 +1295,9 @@ const createMaintenanceRecord = async (req, res) => {
  * 7. MODIFICAR (UPDATE) registro existente en tabla de mantenimiento
  */
 const updateMaintenanceRecord = async (req, res) => {
+  // Catálogos simples (motivos, parentescos, tipos, tamaños...)
+  if (catalogs.isCatalog(req.params.table)) return catalogs.updateCatalog(req, res);
+
   const { table, id } = req.params;
   const updates = req.body;
 
@@ -1613,6 +1623,9 @@ const updateMaintenanceRecord = async (req, res) => {
  * 8. ELIMINAR (DELETE) registro en tabla de mantenimiento
  */
 const deleteMaintenanceRecord = async (req, res) => {
+  // Catálogos simples (motivos, parentescos, tipos, tamaños...)
+  if (catalogs.isCatalog(req.params.table)) return catalogs.deleteCatalog(req, res);
+
   const { table, id } = req.params;
 
   if (table === 'bitacoras' || table === 'bitacora_visitas' || table === 'escaneos_fallidos' || table.startsWith('log')) {
