@@ -6,6 +6,7 @@ const jwt = require('jsonwebtoken');
 // Firebase Admin se inicializa una sola vez en config/firebase.js
 const { sendPush, isPushReady, getPushInitError } = require('../config/firebase');
 const SECRET_KEY = process.env.SECRET_KEY || 'your_secret_key';
+const { ACCION, logUsuario, logPersona, logContrasena } = require('../utils/audit');
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || '00'.repeat(32);
 
 // Helper para cifrar (usado en registro y 2FA)
@@ -151,6 +152,12 @@ const register = async (req, res) => {
       console.log(`🔑 CÓDIGO DE VERIFICACIÓN GENERADO PARA ${EMAIL}: ${verificationCode}`);
       console.log("=======================================================\n");
     }
+    await logUsuario(connection, req, {
+      idUsuario: userId,
+      accion: ACCION.REGISTRO,
+      detalle: isUpdate ? 'Registro repetido: se actualizaron nombre y contraseña pendientes de verificación' : 'Auto-registro desde la app (pendiente de verificar correo)',
+      responsable: NOMBRE_USUARIO,
+    });
     await connection.commit();
 
     const token = jwt.sign({ id: userId }, SECRET_KEY, { expiresIn: 1800 });
@@ -193,6 +200,12 @@ const login = async (req, res) => {
         const maxLoginAttempts = paramRows.length > 0 ? parseInt(paramRows[0].VALOR, 10) : 3;
         if (user.INTENTOS_FALLIDOS + 1 >= maxLoginAttempts) {
           await connection.query("UPDATE TBL_MS_USUARIO SET ID_ESTADO_USUARIO = 3 WHERE EMAIL = ?", [username]);
+          await logUsuario(connection, req, {
+            idUsuario: user.ID_USUARIO,
+            accion: ACCION.BLOQUEO,
+            detalle: `Bloqueo automático: ${maxLoginAttempts} intentos fallidos de contraseña al iniciar sesión`,
+            responsable: 'Sistema (seguridad)',
+          });
           return res.status(403).json({ message: "Usuario bloqueado por múltiples intentos fallidos" });
         }
       }
@@ -288,6 +301,12 @@ const verify2FA = async (req, res) => {
 
       if (user.INTENTOS_FALLIDOS + 1 >= maxLoginAttempts) {
         await connection.query("UPDATE TBL_MS_USUARIO SET ID_ESTADO_USUARIO = 3 WHERE ID_USUARIO = ?", [id_usuario]);
+        await logUsuario(connection, req, {
+          idUsuario: id_usuario,
+          accion: ACCION.BLOQUEO,
+          detalle: `Bloqueo automático: ${maxLoginAttempts} intentos fallidos del código 2FA`,
+          responsable: 'Sistema (seguridad)',
+        });
         return res.status(403).json({ message: "Usuario bloqueado por múltiples intentos fallidos" });
       }
 
@@ -562,6 +581,13 @@ const savePersonalData = async (req, res) => {
     // 8. Actualizar Usuario
     await connection.query("UPDATE TBL_MS_USUARIO SET ID_ESTADO_USUARIO = 4, PRIMER_INGRESO_COMPLETADO = 1 WHERE ID_USUARIO = ?", [id_usuario]);
 
+    await logPersona(connection, req, {
+      idPersona: ID_PERSONA,
+      accion: ACCION.REGISTRO,
+      detalle: `Datos personales registrados en el primer ingreso · Casa ${nombreCondo}${isAdminRequired ? ' · titular de la vivienda' : ''} (pendiente de aprobación)`,
+      responsable: userRows[0].NOMBRE_USUARIO,
+    });
+
     await connection.commit();
 
     // 9. Notificar Administradores (sin bloquear)
@@ -769,6 +795,11 @@ const set2FAStatus = async (req, res) => {
   try {
     connection = await mysqlPool.getConnection();
     await connection.query("UPDATE TBL_MS_USUARIO SET CODIGO_2FA = ? WHERE ID_USUARIO = ?", [enabledNum, userId]);
+    await logUsuario(connection, req, {
+      idUsuario: userId,
+      accion: ACCION.MODIFICACION,
+      detalle: enabledNum ? 'Activó la verificación en dos pasos (2FA)' : 'Desactivó la verificación en dos pasos (2FA)',
+    });
 
     res.json({ success: true, enabled: enabledNum, message: "Estado de 2FA actualizado correctamente" });
   } catch (error) {
@@ -966,6 +997,10 @@ const approveUser = async (req, res) => {
       [targetUsuarioId]
     );
 
+    const casaTxt = userCondo.length > 0 && userCondo[0].DESCRIPCION ? ` · Casa ${userCondo[0].DESCRIPCION}` : '';
+    await logUsuario(connection, req, { idUsuario: targetUsuarioId, accion: ACCION.APROBACION, detalle: `Solicitud de acceso aprobada; usuario activado${casaTxt}` });
+    await logPersona(connection, req, { idUsuario: targetUsuarioId, accion: ACCION.APROBACION, detalle: `Residente aprobado${casaTxt}` });
+
     await connection.commit();
     res.json({ success: true, message: 'Usuario aprobado con éxito' });
   } catch (error) {
@@ -983,6 +1018,10 @@ const rejectUser = async (req, res) => {
   try {
     const connection = await mysqlPool.getConnection();
     await connection.beginTransaction();
+
+    // Fotografía antes de borrar (los logs no tienen FK, sobreviven al DELETE)
+    await logPersona(connection, req, { idUsuario: targetUsuarioId, accion: ACCION.RECHAZO, detalle: 'Solicitud de residente rechazada; registro eliminado' });
+    await logUsuario(connection, req, { idUsuario: targetUsuarioId, accion: ACCION.RECHAZO, detalle: 'Solicitud de acceso rechazada; usuario eliminado' });
 
     // Delete from TBL_PERSONAS first due to FK
     await connection.query('DELETE FROM TBL_PERSONAS WHERE ID_USUARIO = ?', [targetUsuarioId]);
@@ -1164,9 +1203,16 @@ const actualizarContrasena = async (req, res) => {
     const hashedPassword = await bcrypt.hash(nuevaContrasena, 10);
     
     await connection.query(
-      "UPDATE TBL_MS_USUARIO SET CONTRASEÑA = ?, CODIGO_VERIFICACION = NULL, INTENTOS_FALLIDOS = 0 WHERE ID_USUARIO = ?", 
+      "UPDATE TBL_MS_USUARIO SET CONTRASEÑA = ?, CODIGO_VERIFICACION = NULL, INTENTOS_FALLIDOS = 0 WHERE ID_USUARIO = ?",
       [hashedPassword, id_usuario]
     );
+
+    await logContrasena(connection, req, {
+      idUsuario: id_usuario,
+      accion: ACCION.RESTABLECIMIENTO,
+      detalle: 'Contraseña restablecida con código de recuperación enviado al correo',
+      responsable: user.NOMBRE_USUARIO,
+    });
 
     await connection.commit();
     res.json({ success: true, message: "Contraseña actualizada exitosamente" });
@@ -1271,27 +1317,16 @@ const changePassword = async (req, res) => {
     const MAX_HISTORIAL = 5;
     if (allHistory.length > MAX_HISTORIAL) {
       const toRemove = allHistory.slice(MAX_HISTORIAL);
-      const ip = req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'Desconocida';
-      const userAgent = req.headers['user-agent'] || 'Desconocido';
 
       for (const oldItem of toRemove) {
-        try {
-          await connection.query(
-            `INSERT INTO TBL_LOG_HISTORIAL_CONTRASEÑA 
-             (ID_HIST, ID_USUARIO, CONTRASEÑA, FECHA_ELIMINACION, USUARIO_ELIMINACION, ORIGEN_IP, NAVEGADOR)
-             VALUES (?, ?, ?, NOW(), ?, ?, ?)`,
-            [
-              oldItem.ID_HIST,
-              id_usuario,
-              oldItem.CONTRASEÑA,
-              user.NOMBRE_USUARIO || 'Sistema',
-              String(ip).slice(0, 45),
-              String(userAgent).slice(0, 255)
-            ]
-          );
-        } catch (logErr) {
-          console.warn("Advertencia al registrar log de historial:", logErr.message);
-        }
+        await logContrasena(connection, req, {
+          idUsuario: id_usuario,
+          idHist: oldItem.ID_HIST,
+          hash: oldItem.CONTRASEÑA,
+          accion: ACCION.DEPURACION,
+          detalle: `Se depuró una contraseña antigua del historial (se conservan las últimas ${MAX_HISTORIAL})`,
+          responsable: user.NOMBRE_USUARIO || 'Sistema',
+        });
 
         await connection.query("DELETE FROM TBL_MS_HIST_CONTRASEÑA WHERE ID_HIST = ?", [oldItem.ID_HIST]);
       }
@@ -1317,6 +1352,13 @@ const changePassword = async (req, res) => {
        WHERE ID_USUARIO = ?`,
       [hashedNewPassword, diasVencimiento, id_usuario]
     );
+
+    await logContrasena(connection, req, {
+      idUsuario: id_usuario,
+      accion: ACCION.CAMBIO_CONTRASENA,
+      detalle: `El usuario cambió su contraseña; nueva vigencia de ${diasVencimiento} días`,
+      responsable: user.NOMBRE_USUARIO,
+    });
 
     await connection.commit();
 

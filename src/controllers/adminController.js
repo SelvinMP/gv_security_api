@@ -2,6 +2,62 @@ const { mysqlPool } = require('../config/db');
 const bcrypt = require('bcrypt');
 const moment = require('moment-timezone');
 const catalogs = require('../utils/catalogs');
+const { ACCION, logUsuario, logPersona, logParametro } = require('../utils/audit');
+
+// Misma consulta que la "fotografía previa" de updateMaintenanceRecord (usuarios)
+const SNAPSHOT_USUARIO_SQL = `
+  SELECT u.NOMBRE_USUARIO, u.EMAIL, u.ID_ROL, r.ROL, u.ID_ESTADO_USUARIO, eu.DESCRIPCION AS ESTADO,
+         p.DNI_PERSONA, p.NUM_CARNET_EXTRANJERO, p.ID_PADRE, c.DESCRIPCION AS CASA, ct.DESCRIPCION AS CONTACTO
+    FROM TBL_MS_USUARIO u
+    LEFT JOIN TBL_MS_ROLES r ON r.ID_ROL = u.ID_ROL
+    LEFT JOIN TBL_ESTADO_USUARIO eu ON eu.ID_ESTADO_USUARIO = u.ID_ESTADO_USUARIO
+    LEFT JOIN TBL_PERSONAS p ON p.ID_USUARIO = u.ID_USUARIO
+    LEFT JOIN TBL_CONDOMINIOS c ON c.ID_CONDOMINIO = p.ID_CONDOMINIO
+    LEFT JOIN TBL_CONTACTOS ct ON ct.ID_CONTACTO = p.ID_CONTACTO
+   WHERE u.ID_USUARIO = ?`;
+
+/**
+ * Auditoría de la edición de un usuario desde el panel: compara antes / después y
+ * registra en TBL_LOG_USUARIO (cuenta) y TBL_LOG_PERSONA (datos de residente) solo
+ * los campos que realmente cambiaron.
+ */
+const auditUsuarioUpdate = async (connection, req, id, antes, cambioContrasena) => {
+  if (!antes) return;
+  try {
+    const [[despues]] = await connection.query(SNAPSHOT_USUARIO_SQL, [id]);
+    if (!despues) return;
+    const diff = (label, a, b) => (String(a ?? '') !== String(b ?? '') ? `${label}: ${a || '—'} → ${b || '—'}` : null);
+
+    const cuenta = [
+      diff('Nombre', antes.NOMBRE_USUARIO, despues.NOMBRE_USUARIO),
+      diff('Correo', antes.EMAIL, despues.EMAIL),
+      diff('Rol', antes.ROL, despues.ROL),
+      cambioContrasena ? 'Contraseña restablecida por la administración' : null,
+    ].filter(Boolean);
+    const estado = diff('Estado', antes.ESTADO, despues.ESTADO);
+
+    if (estado && cuenta.length === 0) {
+      await logUsuario(connection, req, { idUsuario: id, accion: ACCION.CAMBIO_ESTADO, detalle: estado });
+    } else if (estado || cuenta.length) {
+      await logUsuario(connection, req, { idUsuario: id, accion: ACCION.MODIFICACION, detalle: [...cuenta, estado].filter(Boolean).join(' · ') });
+    }
+
+    const persona = [
+      diff('DNI', antes.DNI_PERSONA, despues.DNI_PERSONA),
+      diff('Carné extranjero', antes.NUM_CARNET_EXTRANJERO, despues.NUM_CARNET_EXTRANJERO),
+      diff('Casa', antes.CASA, despues.CASA),
+      diff('Contacto', antes.CONTACTO, despues.CONTACTO),
+      Number(antes.ID_PADRE) !== Number(despues.ID_PADRE)
+        ? (Number(despues.ID_PADRE) === 1 ? 'Asignado como titular de la vivienda' : 'Dejó de ser titular de la vivienda')
+        : null,
+    ].filter(Boolean);
+    if (persona.length) {
+      await logPersona(connection, req, { idUsuario: id, accion: ACCION.MODIFICACION, detalle: persona.join(' · ') });
+    }
+  } catch (err) {
+    console.warn('[auditoría] No se pudo comparar la edición del usuario:', err.message);
+  }
+};
 const { sendPush, isPushReady, getPushInitError } = require('../config/firebase');
 
 /**
@@ -442,13 +498,16 @@ const getGeocercaConfig = async (req, res) => {
 };
 
 // Helper: guarda los parámetros globales de geocerca (aplican a TODAS las entradas)
-const saveGeocercaParams = async (connection, userId, { activo, precision_maxima }) => {
+const saveGeocercaParams = async (connection, userId, { activo, precision_maxima }, req = null) => {
   const upsert = async (parametro, valor) => {
-    const [rows] = await connection.query('SELECT ID_PARAMETRO FROM TBL_MS_PARAMETROS WHERE PARAMETRO = ?', [parametro]);
+    const [rows] = await connection.query('SELECT * FROM TBL_MS_PARAMETROS WHERE PARAMETRO = ?', [parametro]);
     if (rows.length > 0) {
+      if (String(rows[0].VALOR) === String(valor)) return; // sin cambios: no se audita
       await connection.query('UPDATE TBL_MS_PARAMETROS SET VALOR = ?, FECHA_MODIFICACION = NOW() WHERE PARAMETRO = ?', [valor, parametro]);
+      await logParametro(connection, req, { parametro, accion: ACCION.MODIFICACION, antes: rows[0] });
     } else {
       await connection.query('INSERT INTO TBL_MS_PARAMETROS (ID_USUARIO, PARAMETRO, VALOR, FECHA_CREACION) VALUES (?, ?, ?, NOW())', [userId, parametro, valor]);
+      await logParametro(connection, req, { parametro, accion: ACCION.CREACION, detalle: `Parámetro creado desde Geocerca con valor ${valor}` });
     }
   };
 
@@ -563,7 +622,7 @@ const updateGeocercaConfig = async (req, res) => {
       creada = true;
     }
 
-    await saveGeocercaParams(connection, req.user.id, { activo, precision_maxima });
+    await saveGeocercaParams(connection, req.user.id, { activo, precision_maxima }, req);
 
     await connection.commit();
 
@@ -600,7 +659,7 @@ const updateGeocercaParams = async (req, res) => {
     await saveGeocercaParams(connection, req.user.id, {
       activo: req.body.activo,
       precision_maxima: req.body.precision_maxima
-    });
+    }, req);
     await connection.commit();
     res.status(200).json({ success: true, message: 'Parámetros globales de geocerca actualizados.' });
   } catch (error) {
@@ -857,7 +916,7 @@ const getMaintenanceTable = async (req, res) => {
           FROM TBL_LOG_ESCANEO_FALLIDO l
           LEFT JOIN TBL_MS_USUARIO u ON l.ID_USUARIO_GUARDIA = u.ID_USUARIO
           ORDER BY l.FECHA_HORA DESC
-          LIMIT 50;
+          LIMIT 1000;
         `);
         return res.status(200).json({ success: true, table, data: rows });
       }
@@ -905,16 +964,21 @@ const getMaintenanceTable = async (req, res) => {
           SELECT 
             lu.ID_LOG_USUARIO,
             lu.NOMBRE_USUARIO,
+            lu.ID_USUARIO,
             lu.EMAIL,
             COALESCE(r.ROL, 'Usuario') AS ROL,
+            eu.DESCRIPCION AS ESTADO_USUARIO,
+            COALESCE(lu.ACCION, 'ELIMINACIÓN (histórico)') AS ACCION,
+            COALESCE(lu.DETALLE, 'Registro copiado por el trigger de la base anterior al eliminarse') AS DETALLE,
             lu.FECHA_ELIMINACION,
             COALESCE(lu.USUARIO_ELIMINACION, 'Sistema') AS USUARIO_ELIMINACION,
             COALESCE(lu.ORIGEN_IP, 'Desconocida') AS ORIGEN_IP,
             COALESCE(lu.NAVEGADOR, 'Navegador web') AS NAVEGADOR
           FROM TBL_LOG_USUARIO lu
           LEFT JOIN TBL_MS_ROLES r ON lu.ID_ROL = r.ID_ROL
-          ORDER BY lu.FECHA_ELIMINACION DESC
-          LIMIT 200;
+          LEFT JOIN TBL_ESTADO_USUARIO eu ON lu.ID_ESTADO_USUARIO = eu.ID_ESTADO_USUARIO
+          ORDER BY lu.FECHA_ELIMINACION DESC, lu.ID_LOG_USUARIO DESC
+          LIMIT 1000;
         `);
         return res.status(200).json({ success: true, table, data: rows });
       }
@@ -926,14 +990,16 @@ const getMaintenanceTable = async (req, res) => {
             lp.NOMBRE_PERSONA,
             COALESCE(lp.DNI_PERSONA, '-') AS DNI_PERSONA,
             COALESCE(condo.DESCRIPCION, 'No asignada') AS NUM_CASA,
+            COALESCE(lp.ACCION, 'ELIMINACIÓN (histórico)') AS ACCION,
+            COALESCE(lp.DETALLE, 'Registro copiado por el trigger de la base anterior al eliminarse') AS DETALLE,
             lp.FECHA_ELIMINACION,
             COALESCE(lp.USUARIO_ELIMINACION, 'Sistema') AS USUARIO_ELIMINACION,
             COALESCE(lp.ORIGEN_IP, 'Desconocida') AS ORIGEN_IP,
             COALESCE(lp.NAVEGADOR, 'Navegador web') AS NAVEGADOR
           FROM TBL_LOG_PERSONA lp
           LEFT JOIN TBL_CONDOMINIOS condo ON lp.ID_CONDOMINIO = condo.ID_CONDOMINIO
-          ORDER BY lp.FECHA_ELIMINACION DESC
-          LIMIT 200;
+          ORDER BY lp.FECHA_ELIMINACION DESC, lp.ID_LOG_PERSONA DESC
+          LIMIT 1000;
         `);
         return res.status(200).json({ success: true, table, data: rows });
       }
@@ -944,13 +1010,15 @@ const getMaintenanceTable = async (req, res) => {
             lp.ID_LOG_PARAMETRO,
             lp.PARAMETRO,
             lp.VALOR,
+            COALESCE(lp.ACCION, 'ELIMINACIÓN (histórico)') AS ACCION,
+            COALESCE(lp.DETALLE, 'Registro copiado por el trigger de la base anterior al eliminarse') AS DETALLE,
             lp.FECHA_ELIMINACION,
             COALESCE(lp.USUARIO_ELIMINACION, 'Sistema') AS USUARIO_ELIMINACION,
             COALESCE(lp.ORIGEN_IP, 'Desconocida') AS ORIGEN_IP,
             COALESCE(lp.NAVEGADOR, 'Navegador web') AS NAVEGADOR
           FROM TBL_LOG_PARAMETROS lp
-          ORDER BY lp.FECHA_ELIMINACION DESC
-          LIMIT 200;
+          ORDER BY lp.FECHA_ELIMINACION DESC, lp.ID_LOG_PARAMETRO DESC
+          LIMIT 1000;
         `);
         return res.status(200).json({ success: true, table, data: rows });
       }
@@ -961,13 +1029,15 @@ const getMaintenanceTable = async (req, res) => {
             lr.ID_LOG_ROL,
             lr.ROL,
             COALESCE(lr.DESCRIPCION, '-') AS DESCRIPCION,
+            COALESCE(lr.ACCION, 'ELIMINACIÓN (histórico)') AS ACCION,
+            COALESCE(lr.DETALLE, 'Registro copiado por el trigger de la base anterior al eliminarse') AS DETALLE,
             lr.FECHA_ELIMINACION,
             COALESCE(lr.USUARIO_ELIMINACION, 'Sistema') AS USUARIO_ELIMINACION,
             COALESCE(lr.ORIGEN_IP, 'Desconocida') AS ORIGEN_IP,
             COALESCE(lr.NAVEGADOR, 'Navegador web') AS NAVEGADOR
           FROM TBL_LOG_ROLES lr
-          ORDER BY lr.FECHA_ELIMINACION DESC
-          LIMIT 200;
+          ORDER BY lr.FECHA_ELIMINACION DESC, lr.ID_LOG_ROL DESC
+          LIMIT 1000;
         `);
         return res.status(200).json({ success: true, table, data: rows });
       }
@@ -977,14 +1047,23 @@ const getMaintenanceTable = async (req, res) => {
           SELECT 
             lp.ID_LOG_PERMISO,
             COALESCE(r.ROL, 'Rol General') AS ROL,
+            COALESCE(o.OBJETO, '-') AS OBJETO,
+            CONCAT_WS(' · ',
+              IF(lp.PERMISO_CONSULTAR = 1, 'Consultar', NULL),
+              IF(lp.PERMISO_INSERCION = 1, 'Insertar', NULL),
+              IF(lp.PERMISO_ACTUALIZACION = 1, 'Actualizar', NULL),
+              IF(lp.PERMISO_ELIMINACION = 1, 'Eliminar', NULL)) AS PERMISOS,
+            COALESCE(lp.ACCION, 'ELIMINACIÓN (histórico)') AS ACCION,
+            COALESCE(lp.DETALLE, 'Registro copiado por el trigger de la base anterior al eliminarse') AS DETALLE,
             lp.FECHA_ELIMINACION,
             COALESCE(lp.USUARIO_ELIMINACION, 'Sistema') AS USUARIO_ELIMINACION,
             COALESCE(lp.ORIGEN_IP, 'Desconocida') AS ORIGEN_IP,
             COALESCE(lp.NAVEGADOR, 'Navegador web') AS NAVEGADOR
           FROM TBL_LOG_PERMISOS lp
           LEFT JOIN TBL_MS_ROLES r ON lp.ID_ROL = r.ID_ROL
-          ORDER BY lp.FECHA_ELIMINACION DESC
-          LIMIT 200;
+          LEFT JOIN TBL_OBJETOS o ON lp.ID_OBJETO = o.ID_OBJETO
+          ORDER BY lp.FECHA_ELIMINACION DESC, lp.ID_LOG_PERMISO DESC
+          LIMIT 1000;
         `);
         return res.status(200).json({ success: true, table, data: rows });
       }
@@ -994,14 +1073,17 @@ const getMaintenanceTable = async (req, res) => {
           SELECT 
             lh.ID_LOG_HIST,
             COALESCE(u.NOMBRE_USUARIO, 'Usuario') AS NOMBRE_USUARIO,
+            u.EMAIL,
+            COALESCE(lh.ACCION, 'DEPURACIÓN') AS ACCION,
+            COALESCE(lh.DETALLE, 'Contraseña antigua depurada del historial') AS DETALLE,
             lh.FECHA_ELIMINACION,
             COALESCE(lh.USUARIO_ELIMINACION, 'Sistema') AS USUARIO_ELIMINACION,
             COALESCE(lh.ORIGEN_IP, 'Desconocida') AS ORIGEN_IP,
             COALESCE(lh.NAVEGADOR, 'Navegador web') AS NAVEGADOR
           FROM \`TBL_LOG_HISTORIAL_CONTRASEÑA\` lh
           LEFT JOIN TBL_MS_USUARIO u ON lh.ID_USUARIO = u.ID_USUARIO
-          ORDER BY lh.FECHA_ELIMINACION DESC
-          LIMIT 200;
+          ORDER BY lh.FECHA_ELIMINACION DESC, lh.ID_LOG_HIST DESC
+          LIMIT 1000;
         `);
         return res.status(200).json({ success: true, table, data: rows });
       }
@@ -1204,6 +1286,18 @@ const createMaintenanceRecord = async (req, res) => {
           ID_ESTADO_USUARIO || 1
         ]);
 
+        const rolTxt = { 2: 'Usuario / residente', 3: 'Guardia', 4: 'Administrador' }[rolNum] || `Rol ${rolNum}`;
+        await logUsuario(connection, req, {
+          idUsuario: newUserId,
+          accion: ACCION.CREACION,
+          detalle: `Usuario creado desde el panel administrativo · Rol: ${rolTxt}${finalPadre === 1 ? ' · titular de la vivienda' : ''}`,
+        });
+        await logPersona(connection, req, {
+          idUsuario: newUserId,
+          accion: ACCION.CREACION,
+          detalle: isGuardia ? 'Persona creada para guardia de caseta' : 'Datos de residente registrados por la administración',
+        });
+
         break;
       }
 
@@ -1272,6 +1366,11 @@ const createMaintenanceRecord = async (req, res) => {
           INSERT INTO TBL_MS_PARAMETROS (ID_USUARIO, PARAMETRO, VALOR, FECHA_CREACION)
           VALUES (?, ?, ?, NOW());
         `, [req.user.id, PARAMETRO.toUpperCase().trim(), String(VALOR)]);
+        await logParametro(connection, req, {
+          parametro: PARAMETRO.toUpperCase().trim(),
+          accion: ACCION.CREACION,
+          detalle: `Parámetro creado con valor ${String(VALOR)}`,
+        });
         break;
       }
 
@@ -1357,6 +1456,9 @@ const updateMaintenanceRecord = async (req, res) => {
         }
 
         params.push(id);
+
+        // Fotografía previa para dejar constancia de qué cambió (auditoría)
+        const [[antesUsuario]] = await connection.query(SNAPSHOT_USUARIO_SQL, [id]);
 
         await connection.query(`
           UPDATE TBL_MS_USUARIO SET
@@ -1541,6 +1643,9 @@ const updateMaintenanceRecord = async (req, res) => {
             ID_ESTADO_USUARIO || 1
           ]);
         }
+
+        // ── Auditoría: comparar antes / después ──
+        await auditUsuarioUpdate(connection, req, id, antesUsuario, Boolean(passwordQuery));
         break;
       }
 
@@ -1593,6 +1698,7 @@ const updateMaintenanceRecord = async (req, res) => {
 
       case 'parametros': {
         const { PARAMETRO, VALOR } = updates;
+        const [[antesParametro]] = await connection.query('SELECT * FROM TBL_MS_PARAMETROS WHERE ID_PARAMETRO = ?', [id]);
         await connection.query(`
           UPDATE TBL_MS_PARAMETROS SET
             PARAMETRO = COALESCE(?, PARAMETRO),
@@ -1600,6 +1706,14 @@ const updateMaintenanceRecord = async (req, res) => {
             FECHA_MODIFICACION = NOW()
           WHERE ID_PARAMETRO = ?;
         `, [PARAMETRO, VALOR, id]);
+        if (antesParametro) {
+          const cambios = [];
+          if (PARAMETRO && PARAMETRO !== antesParametro.PARAMETRO) cambios.push(`Nombre: ${antesParametro.PARAMETRO} → ${PARAMETRO}`);
+          if (VALOR !== undefined && VALOR !== null && String(VALOR) !== String(antesParametro.VALOR)) cambios.push(`Valor: ${antesParametro.VALOR} → ${VALOR}`);
+          if (cambios.length) {
+            await logParametro(connection, req, { idParametro: id, accion: ACCION.MODIFICACION, detalle: cambios.join(' · ') });
+          }
+        }
         break;
       }
 
@@ -1646,6 +1760,8 @@ const deleteMaintenanceRecord = async (req, res) => {
         // En usuarios hacemos desactivación de estado para no romper integridad de bitácora
         await connection.query('UPDATE TBL_MS_USUARIO SET ID_ESTADO_USUARIO = 2 WHERE ID_USUARIO = ?', [id]);
         await connection.query('UPDATE TBL_PERSONAS SET ID_ESTADO_PERSONA = 2 WHERE ID_USUARIO = ?', [id]);
+        await logUsuario(connection, req, { idUsuario: id, accion: ACCION.DESACTIVACION, detalle: 'Usuario dado de baja desde el panel (estado inactivo)' });
+        await logPersona(connection, req, { idUsuario: id, accion: ACCION.DESACTIVACION, detalle: 'Residente dado de baja desde el panel' });
         break;
       }
 
@@ -1666,7 +1782,16 @@ const deleteMaintenanceRecord = async (req, res) => {
       }
 
       case 'parametros': {
+        const [[antes]] = await connection.query('SELECT * FROM TBL_MS_PARAMETROS WHERE ID_PARAMETRO = ?', [id]);
         await connection.query('DELETE FROM TBL_MS_PARAMETROS WHERE ID_PARAMETRO = ?', [id]);
+        if (antes) {
+          await logParametro(connection, req, {
+            idParametro: id,
+            antes,
+            accion: ACCION.ELIMINACION,
+            detalle: `Parámetro eliminado (último valor: ${antes.VALOR})`,
+          });
+        }
         break;
       }
 
