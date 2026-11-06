@@ -3,19 +3,8 @@ const { transporter, sendMailWithTimeout } = require('../config/transporter');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
-const admin = require('firebase-admin');
-
-try {
-  if (!admin.apps.length) {
-    const serviceAccount = require('../config/firebaseServiceAccountKey.json');
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
-    });
-    console.log("🔥 Firebase Admin inicializado correctamente");
-  }
-} catch (error) {
-  console.warn("⚠️ Firebase Admin NO inicializado. Faltan credenciales (src/config/firebaseServiceAccountKey.json).");
-}
+// Firebase Admin se inicializa una sola vez en config/firebase.js
+const { sendPush, isPushReady, getPushInitError } = require('../config/firebase');
 const SECRET_KEY = process.env.SECRET_KEY || 'your_secret_key';
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || '00'.repeat(32);
 
@@ -640,17 +629,8 @@ const notifyAdmins = async (nombre, contacto, condo, isNewAdmin, condoId, esHond
     }
 
     // 4. Enviar Push vía Firebase Cloud Messaging
-    if (TokensFCM.length > 0 && admin.apps.length > 0) {
-      const message = {
-        notification: {
-          title: `ALERTA: ${asunt}`,
-          body: menj,
-        },
-        tokens: TokensFCM
-      };
-      admin.messaging().sendEachForMulticast(message)
-        .then((response) => console.log(`[FCM] ${response.successCount} mensajes enviados correctamente.`))
-        .catch((error) => console.error('[FCM] Error enviando push:', error));
+    if (TokensFCM.length > 0) {
+      sendPush(TokensFCM, { title: `ALERTA: ${asunt}`, body: menj, link: '/notifications' });
     }
 
   } catch (err) {
@@ -1393,7 +1373,7 @@ const getPushStatus = async (req, res) => {
     
     const token = rows[0].FCM_TOKEN;
     const isEnabled = !!token && token !== 'DISABLED' && token.trim().length > 10;
-    res.json({ success: true, enabled: isEnabled });
+    res.json({ success: true, enabled: isEnabled, serverReady: isPushReady() });
   } catch (error) {
     console.error("Error al obtener estado push:", error);
     res.status(500).json({ message: "Error al consultar estado push" });
@@ -1417,6 +1397,41 @@ const setPushStatus = async (req, res) => {
     res.status(500).json({ message: "Error al actualizar estado de notificaciones push" });
   } finally {
     if (connection) connection.release();
+  }
+};
+
+/**
+ * Envía una notificación push de prueba al usuario autenticado (botón en Configuración).
+ */
+const sendTestPush = async (req, res) => {
+  const userId = req.user && req.user.id;
+  if (!userId) return res.status(401).json({ success: false, message: 'Sesión no válida.' });
+  if (!isPushReady()) {
+    return res.status(503).json({ success: false, message: 'El servidor no tiene configurado Firebase: ' + (getPushInitError() || 'sin credenciales') });
+  }
+  try {
+    const [rows] = await mysqlPool.query('SELECT FCM_TOKEN FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?', [userId]);
+    const token = rows[0] && rows[0].FCM_TOKEN;
+    if (!token) return res.status(400).json({ success: false, message: 'Este usuario no tiene notificaciones push activadas.' });
+
+    const result = await sendPush(token, {
+      title: 'GV-Security: prueba de notificación',
+      body: 'Si ves este mensaje, las notificaciones push funcionan correctamente en este dispositivo.',
+      link: '/settings'
+    });
+    if (result.successCount > 0) return res.json({ success: true, message: 'Notificación de prueba enviada.' });
+    const code = result.errors[0] || 'desconocido';
+    const expired = /not-registered|invalid-registration|invalid-argument/.test(code);
+    return res.status(expired ? 410 : 502).json({
+      success: false,
+      expired,
+      message: expired
+        ? 'El registro de este dispositivo venció. Vuelva a activar las notificaciones.'
+        : 'Firebase no pudo entregar la notificación (' + code + ').'
+    });
+  } catch (error) {
+    console.error('Error en notificación de prueba:', error);
+    res.status(500).json({ success: false, message: 'Error al enviar la notificación de prueba.' });
   }
 };
 
@@ -1445,5 +1460,6 @@ module.exports = {
   changePassword,
   saveFCMToken,
   getPushStatus,
-  setPushStatus
+  setPushStatus,
+  sendTestPush
 };

@@ -3,7 +3,7 @@
  * push (Firebase Cloud Messaging) y correo electrónico.
  * Nunca lanza errores: un fallo al notificar no debe revertir la operación.
  */
-const admin = require('firebase-admin');
+const { sendPush } = require('../config/firebase');
 const { sendMailWithTimeout } = require('../config/transporter');
 
 const escapeHtml = (value) =>
@@ -67,10 +67,8 @@ const notifyUser = async (connection, userId, { title, message, emailSubject, em
       [userId, String(title).slice(0, 150), message]
     );
 
-    if (user.FCM_TOKEN && admin.apps.length > 0) {
-      admin.messaging()
-        .send({ notification: { title, body: message }, token: user.FCM_TOKEN })
-        .catch(err => console.log('Error FCM:', err.message));
+    if (user.FCM_TOKEN) {
+      sendPush(user.FCM_TOKEN, { title, body: message, link: '/notifications' });
     }
 
     if (sendEmail && user.EMAIL) {

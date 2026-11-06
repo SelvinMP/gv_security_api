@@ -1,3 +1,6 @@
+// Zona horaria oficial: Honduras (debe ir antes de cargar cualquier módulo)
+process.env.TZ = 'America/Tegucigalpa';
+
 const dns = require('dns');
 if (dns.setDefaultResultOrder) {
   dns.setDefaultResultOrder('ipv4first');

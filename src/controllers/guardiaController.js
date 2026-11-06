@@ -2,7 +2,7 @@ const { mysqlPool } = require('../config/db');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const moment = require('moment-timezone');
-const admin = require('firebase-admin');
+const { sendPush } = require('../config/firebase');
 const { sendMailWithTimeout } = require('../config/transporter');
 
 const SECRET_KEY = process.env.SECRET_KEY || 'your_secret_key';
@@ -517,17 +517,8 @@ const confirmEntry = async (req, res) => {
           [userId, title, bodyMsg]
         );
 
-        if (userRows[0].FCM_TOKEN && admin.apps.length > 0) {
-          const message = {
-            notification: {
-              title: title,
-              body: bodyMsg,
-            },
-            token: userRows[0].FCM_TOKEN
-          };
-          admin.messaging().send(message)
-            .then(() => console.log('FCM Guardia a Residente enviado'))
-            .catch((err) => console.log('Error FCM Guardia:', err));
+        if (userRows[0].FCM_TOKEN) {
+          sendPush(userRows[0].FCM_TOKEN, { title, body: bodyMsg, link: '/notifications' });
         }
 
         // Send Email if there is a behavior motive

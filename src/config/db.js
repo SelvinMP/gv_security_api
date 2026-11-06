@@ -1,3 +1,8 @@
+// Zona horaria oficial del sistema: Honduras (UTC-6, sin horario de verano).
+// Se fija aquí para que Node, moment() y MySQL usen la misma hora en cualquier servidor (Render, local, etc.).
+process.env.TZ = 'America/Tegucigalpa';
+const HN_OFFSET = '-06:00';
+
 const { Sequelize } = require('sequelize');
 const mysql = require('mysql2/promise');
 require('dotenv').config();
@@ -12,6 +17,7 @@ const db = new Sequelize(
     dialect: 'mysql',
     port: process.env.DB_PORT,
     logging: false,
+    timezone: HN_OFFSET, // NOW()/CURDATE() y fechas en hora de Honduras
     // --- ESTO SOLUCIONA EL ERROR EN SEQUELIZE ---
     dialectOptions: {
       authPlugins: {
@@ -34,7 +40,14 @@ const mysqlPool = mysql.createPool({
   queueLimit: 0,
   // --- ESTO SOLUCIONA EL ERROR EN EL POOL ---
   allowPublicKeyRetrieval: true,
-  ssl: false 
+  ssl: false,
+  timezone: HN_OFFSET // las columnas DATETIME se interpretan como hora de Honduras
+});
+
+// Cada conexión nueva del pool trabaja en hora de Honduras: NOW(), CURDATE(), etc.
+// (el servidor MySQL de Railway está en UTC)
+mysqlPool.on('connection', (conn) => {
+  conn.query(`SET time_zone = '${HN_OFFSET}'`);
 });
 
 // Función para probar la conexión

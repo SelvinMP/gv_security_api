@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
+const { authenticateToken } = require('../middlewares/authMiddleware');
 
 router.post('/register', authController.register);
 router.post('/login', authController.login);
@@ -35,6 +36,7 @@ router.get('/personas', authController.getCondos);
 router.post('/save-fcm-token', authController.saveFCMToken);
 router.get('/push-status/:usuarioId', authController.getPushStatus);
 router.post('/set-push-status', authController.setPushStatus);
+router.post('/push-test', authenticateToken, authController.sendTestPush);
 router.post('/change-password', authController.changePassword);
 router.post('/forgot-password', authController.enviarCodigoRecuperacion);
 router.post('/verify-reset-code', authController.verificarCodigoRecuperacion);

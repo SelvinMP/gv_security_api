@@ -2,6 +2,7 @@ const { mysqlPool } = require('../config/db');
 const bcrypt = require('bcrypt');
 const moment = require('moment-timezone');
 const catalogs = require('../utils/catalogs');
+const { sendPush, isPushReady, getPushInitError } = require('../config/firebase');
 
 /**
  * 1. Obtiene métricas y estadísticas consolidadas para el Dashboard Administrativo
@@ -1921,47 +1922,26 @@ const sendPushNotificationAndAnnouncement = async (req, res) => {
     let pushSuccessCount = 0;
     let pushFailureCount = 0;
 
-    let firebaseAdmin = null;
-    try {
-      const admin = require('firebase-admin');
-      if (admin.apps.length > 0) {
-        firebaseAdmin = admin;
+    let pushError = null;
+    if (enviarPushFCM !== false && fcmTokens.length > 0) {
+      let imageUrl;
+      if (imagen) {
+        // Render usa proxy: preferir el protocolo original (https)
+        const protocol = req.get('x-forwarded-proto') || req.protocol;
+        imageUrl = imagen.startsWith('http') ? imagen : `${protocol}://${req.get('host')}/${imagen.replace(/^\//, '')}`;
       }
-    } catch {
-      // Firebase opcional si falta configuración
-    }
-
-    if (enviarPushFCM !== false && fcmTokens.length > 0 && firebaseAdmin) {
-      try {
-        const payload = {
-          notification: {
-            title: titulo,
-            body: mensaje
-          },
-          data: {
-            tipo: 'anuncio',
-            anuncioId: String(anuncioId || ''),
-            fecha: new Date().toISOString()
-          },
-          tokens: fcmTokens
-        };
-
-        if (imagen) {
-          const host = req.get('host');
-          const protocol = req.protocol;
-          const fullImgUrl = imagen.startsWith('http') 
-            ? imagen 
-            : `${protocol}://${host}/${imagen.replace(/^\//, '')}`;
-          payload.notification.imageUrl = fullImgUrl;
-        }
-
-        const response = await firebaseAdmin.messaging().sendEachForMulticast(payload);
-        pushSuccessCount = response.successCount;
-        pushFailureCount = response.failureCount;
-        console.log(`[FCM PUSH] Notificaciones enviadas: ${pushSuccessCount} exitosas, ${pushFailureCount} fallidas.`);
-      } catch (fcmError) {
-        console.warn('[FCM PUSH] Advertencia al enviar multicast FCM:', fcmError.message);
-      }
+      const result = await sendPush(fcmTokens, {
+        title: titulo,
+        body: mensaje,
+        imageUrl,
+        link: publicarMuro !== false ? '/dashboard' : '/notifications',
+        data: { tipo: 'anuncio', anuncioId: anuncioId || '' }
+      });
+      pushSuccessCount = result.successCount;
+      pushFailureCount = result.failureCount;
+      if (result.successCount === 0 && result.errors.length > 0) pushError = result.errors[0];
+    } else if (enviarPushFCM !== false && !isPushReady()) {
+      pushError = getPushInitError();
     }
 
     res.status(200).json({
@@ -1973,6 +1953,7 @@ const sendPushNotificationAndAnnouncement = async (req, res) => {
         tokensFCMEncontrados: fcmTokens.length,
         pushExitosos: pushSuccessCount,
         pushFallidos: pushFailureCount,
+        pushError,
         imagenRuta: imagen || null
       }
     });
