@@ -46,8 +46,9 @@ app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 
 
-// 2. Conexión a la Base de Datos (GV-Security)
-connectDB();
+// 2. Conexión a la Base de Datos (GV-Security) y verificación de columnas requeridas
+const { ensureSchema } = require('./config/ensureSchema');
+connectDB().then(ensureSchema);
 
 // 3. Rutas de la API
 console.log('Iniciando registro de rutas...');

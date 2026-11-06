@@ -3,6 +3,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const moment = require('moment-timezone');
 const { sendPush } = require('../config/firebase');
+const { isCancelled, buildCancelledResult } = require('../utils/visitCancel');
 const { sendMailWithTimeout } = require('../config/transporter');
 
 const SECRET_KEY = process.env.SECRET_KEY || 'your_secret_key';
@@ -303,6 +304,8 @@ const getVisitDetails = async (req, res) => {
           v.FECHA_HORA,
           v.FECHA_VENCIMIENTO,
           v.ESTADO_QR,
+          v.FECHA_CANCELACION,
+          v.MOTIVO_CANCELACION,
           v.NOTA,
           v.ID_USUARIO,
           u.NOMBRE_USUARIO as RESIDENTE,
@@ -316,6 +319,10 @@ const getVisitDetails = async (req, res) => {
 
       if (rows.length === 0) return res.status(404).json({ message: "No se encontró información para este código QR." });
       
+      if (isCancelled(rows[0])) {
+        const { status, ...body } = buildCancelledResult(rows[0]);
+        return res.status(status).json(body);
+      }
       const vencimiento = moment(rows[0].FECHA_VENCIMIENTO);
       if (moment().isAfter(vencimiento)) return res.status(400).json({ message: "La fecha de validez de este código QR de visita recurrente ya venció o caducó." });
       
@@ -332,6 +339,8 @@ const getVisitDetails = async (req, res) => {
           v.NUM_PLACA,
           v.FECHA_HORA,
           v.ESTADO_QR,
+          v.FECHA_CANCELACION,
+          v.MOTIVO_CANCELACION,
           v.NOTA,
           v.ID_USUARIO,
           u.NOMBRE_USUARIO as RESIDENTE,
@@ -344,6 +353,10 @@ const getVisitDetails = async (req, res) => {
       `, [id]);
 
       if (rows.length === 0) return res.status(404).json({ message: "No se encontró información para este código QR." });
+      if (isCancelled(rows[0])) {
+        const { status, ...body } = buildCancelledResult(rows[0]);
+        return res.status(status).json(body);
+      }
       if (rows[0].ESTADO_QR === 1) return res.status(400).json({ message: "Este código QR de ingreso único ya fue utilizado o escaneado anteriormente." });
       
       return res.status(200).json({ data: rows[0], isRecurrent: false, geocerca: geoValidation });
@@ -419,6 +432,11 @@ const confirmEntry = async (req, res) => {
       if (visitorRes.length === 0) throw new Error("Visita no encontrada");
       visitorData = visitorRes[0];
       userId = visitorData.ID_USUARIO;
+      if (isCancelled(visitorData)) {
+        await connection.rollback();
+        const { status, ...body } = buildCancelledResult(visitorData);
+        return res.status(status).json(body);
+      }
 
       // Update TBL_VISITANTES_RECURRENTES
       await connection.query(`
@@ -457,6 +475,11 @@ const confirmEntry = async (req, res) => {
     } else {
       const [visitorRes] = await connection.query("SELECT * FROM TBL_REGVISITAS WHERE ID_VISITANTE = ?", [id]);
       if (visitorRes.length === 0) throw new Error("Visita no encontrada");
+      if (isCancelled(visitorRes[0])) {
+        await connection.rollback();
+        const { status, ...body } = buildCancelledResult(visitorRes[0]);
+        return res.status(status).json(body);
+      }
       visitorData = visitorRes[0];
       userId = visitorData.ID_USUARIO;
 
@@ -639,13 +662,14 @@ const queryVisit = async (connection, id, isRecurrent) => {
     const [rows] = await connection.query(`
       SELECT v.ID_VISITANTES_RECURRENTES as id, v.NOMBRE_VISITANTE, v.DNI_VISITANTE, v.NUM_CARNET_EXTRANJERO,
              v.ID_NACIONALIDAD, v.NUM_PERSONAS, v.NUM_PLACA, v.FECHA_HORA, v.FECHA_VENCIMIENTO, v.ESTADO_QR,
-             v.NOTA, v.ID_USUARIO, u.NOMBRE_USUARIO as RESIDENTE, c.DESCRIPCION as CASA_DESTINO
+             v.FECHA_CANCELACION, v.MOTIVO_CANCELACION, v.NOTA, v.ID_USUARIO, u.NOMBRE_USUARIO as RESIDENTE, c.DESCRIPCION as CASA_DESTINO
         FROM TBL_VISITANTES_RECURRENTES v
         JOIN TBL_MS_USUARIO u ON v.ID_USUARIO = u.ID_USUARIO
         LEFT JOIN TBL_PERSONAS p ON p.ID_USUARIO = v.ID_USUARIO
         LEFT JOIN TBL_CONDOMINIOS c ON c.ID_CONDOMINIO = p.ID_CONDOMINIO
        WHERE v.ID_VISITANTES_RECURRENTES = ?`, [id]);
     if (rows.length === 0) return { status: 404, message: 'No se encontró información para este código QR.' };
+    if (isCancelled(rows[0])) return buildCancelledResult(rows[0]);
     if (moment().isAfter(moment(rows[0].FECHA_VENCIMIENTO))) {
       return { status: 400, message: 'La fecha de validez de este código QR de visita recurrente ya venció o caducó.' };
     }
@@ -653,7 +677,7 @@ const queryVisit = async (connection, id, isRecurrent) => {
   }
   const [rows] = await connection.query(`
     SELECT v.ID_VISITANTE as id, v.NOMBRE_VISITANTE, v.DNI_VISITANTE, v.NUM_CARNET_EXTRANJERO, v.ID_NACIONALIDAD,
-           v.NUM_PERSONAS, v.NUM_PLACA, v.FECHA_HORA, v.ESTADO_QR, v.NOTA, v.ID_USUARIO,
+           v.NUM_PERSONAS, v.NUM_PLACA, v.FECHA_HORA, v.ESTADO_QR, v.FECHA_CANCELACION, v.MOTIVO_CANCELACION, v.NOTA, v.ID_USUARIO,
            u.NOMBRE_USUARIO as RESIDENTE, c.DESCRIPCION as CASA_DESTINO
       FROM TBL_REGVISITAS v
       JOIN TBL_MS_USUARIO u ON v.ID_USUARIO = u.ID_USUARIO
@@ -661,6 +685,7 @@ const queryVisit = async (connection, id, isRecurrent) => {
       LEFT JOIN TBL_CONDOMINIOS c ON c.ID_CONDOMINIO = p.ID_CONDOMINIO
      WHERE v.ID_VISITANTE = ?`, [id]);
   if (rows.length === 0) return { status: 404, message: 'No se encontró información para este código QR.' };
+  if (isCancelled(rows[0])) return buildCancelledResult(rows[0]);
   if (rows[0].ESTADO_QR === 1) return { status: 400, message: 'Este código QR de ingreso único ya fue utilizado o escaneado anteriormente.' };
   return { data: rows[0] };
 };
@@ -786,7 +811,10 @@ const scanQR = async (req, res) => {
       default: return res.status(400).json({ message: 'Tipo de código QR no reconocido.' });
     }
 
-    if (result.status) return res.status(result.status).json({ message: result.message });
+    if (result.status) {
+      const { status, ...body } = result;
+      return res.status(status).json(body);
+    }
     return res.status(200).json({ kind, isRecurrent: kind === 'recurrent', data: result.data, geocerca: geoValidation });
   } catch (error) {
     console.error('Error en scanQR:', error);

@@ -8,6 +8,8 @@ router.get('/resident-qr', authenticateToken, visitorController.getResidentQR);
 router.post('/registrar_visitas', visitorController.registerVisit);
 router.post('/validateQR', visitorController.validateQR);
 router.get('/history/:usuarioId', visitorController.getVisitorHistory);
+// Cancelar visita (debe ir antes de '/:type/:id')
+router.post('/cancel/:type/:id', authenticateToken, visitorController.cancelVisit);
 router.delete('/:type/:id', visitorController.deleteVisitor);
 router.get('/recurrent-summary/:usuarioId', visitorController.getRecurrentVisitSummary);
 router.get('/recurrent-details/:usuarioId', visitorController.getRecurrentVisitDetails);

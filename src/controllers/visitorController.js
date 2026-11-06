@@ -170,6 +170,9 @@ const getVisitorHistory = async (req, res) => {
         FECHA_HORA,
         FECHA_ACCESO,
         ESTADO_QR,
+        NOTA,
+        FECHA_CANCELACION,
+        MOTIVO_CANCELACION,
         'normal' as type
       FROM TBL_REGVISITAS 
       WHERE ID_USUARIO = ? ${searchFilter} ${historyInterval}
@@ -193,6 +196,9 @@ const getVisitorHistory = async (req, res) => {
         FECHA_VENCIMIENTO,
         ESTADO_QR,
         CANTIDAD_ESCANEANA,
+        NOTA,
+        FECHA_CANCELACION,
+        MOTIVO_CANCELACION,
         'recurrent' as type
       FROM TBL_VISITANTES_RECURRENTES
       WHERE ID_USUARIO = ? ${searchFilter} ${recurrentInterval}
@@ -228,7 +234,7 @@ const regenerateVisit = async (req, res) => {
 
       const formattedExpiry = moment(newExpiry).format("YYYY-MM-DD HH:mm:ss");
       await connection.query(
-        "UPDATE TBL_VISITANTES_RECURRENTES SET FECHA_VENCIMIENTO = ?, NUM_PERSONAS = ?, NUM_PLACA = ?, ESTADO_QR = 0, NOTA = ? WHERE ID_VISITANTES_RECURRENTES = ?",
+        "UPDATE TBL_VISITANTES_RECURRENTES SET FECHA_VENCIMIENTO = ?, NUM_PERSONAS = ?, NUM_PLACA = ?, ESTADO_QR = 0, NOTA = ?, FECHA_CANCELACION = NULL, MOTIVO_CANCELACION = NULL WHERE ID_VISITANTES_RECURRENTES = ?",
         [formattedExpiry, parsePersonas(numPersonas, originalVisit.NUM_PERSONAS), numPlaca || originalVisit.NUM_PLACA, nota !== undefined && nota !== '' ? nota : originalVisit.NOTA, id]
       );
       
@@ -415,6 +421,59 @@ const deleteVisitor = async (req, res) => {
   }
 };
 
+/**
+ * Cancela una visita (única o recurrente). El QR deja de ser válido y en el portón
+ * se muestra "Acceso denegado: visita cancelada". Solo el residente dueño puede cancelarla.
+ */
+const cancelVisit = async (req, res) => {
+  const { type, id } = req.params;
+  const userId = req.user && req.user.id;
+  const motivo = String((req.body && req.body.motivo) || '').trim().slice(0, 255) || null;
+  const isRecurrent = type === 'recurrent';
+  const table = isRecurrent ? 'TBL_VISITANTES_RECURRENTES' : 'TBL_REGVISITAS';
+  const pk = isRecurrent ? 'ID_VISITANTES_RECURRENTES' : 'ID_VISITANTE';
+
+  if (!['recurrent', 'normal'].includes(type)) return res.status(400).json({ message: 'Tipo de visita inválido.' });
+
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const [rows] = await connection.query(
+      `SELECT ${pk} AS id, ID_USUARIO, NOMBRE_VISITANTE, ESTADO_QR, FECHA_VENCIMIENTO_COL, FECHA_CANCELACION FROM ${table} WHERE ${pk} = ?`
+        .replace('FECHA_VENCIMIENTO_COL', isRecurrent ? 'FECHA_VENCIMIENTO' : 'NULL AS FECHA_VENCIMIENTO'),
+      [id]
+    );
+    if (rows.length === 0) return res.status(404).json({ message: 'Visita no encontrada.' });
+    const visit = rows[0];
+
+    if (Number(visit.ID_USUARIO) !== Number(userId)) {
+      return res.status(403).json({ message: 'Solo el residente que registró la visita puede cancelarla.' });
+    }
+    if (visit.FECHA_CANCELACION) return res.status(409).json({ message: 'Esta visita ya fue cancelada.' });
+    if (!isRecurrent && Number(visit.ESTADO_QR) === 1) {
+      return res.status(409).json({ message: 'No se puede cancelar: el visitante ya ingresó al residencial.' });
+    }
+
+    const ahora = moment().tz('America/Tegucigalpa').format('YYYY-MM-DD HH:mm:ss');
+    await connection.query(
+      `UPDATE ${table} SET FECHA_CANCELACION = ?, MOTIVO_CANCELACION = ? WHERE ${pk} = ?`,
+      [ahora, motivo, id]
+    );
+
+    res.status(200).json({
+      success: true,
+      message: `La visita de ${visit.NOMBRE_VISITANTE} fue cancelada. Su código QR ya no permite el ingreso.`,
+      FECHA_CANCELACION: ahora,
+      MOTIVO_CANCELACION: motivo
+    });
+  } catch (error) {
+    console.error('Error al cancelar visita:', error);
+    res.status(500).json({ message: 'Error al cancelar la visita.' });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
 const getRecurrentVisitSummary = async (req, res) => {
   const { usuarioId } = req.params;
   let connection;
@@ -505,5 +564,6 @@ module.exports = {
   getRecurrentVisitDetails, 
   updateRecurrentVisitExpiry,
   regenerateVisit,
-  convertToRecurrent
+  convertToRecurrent,
+  cancelVisit
 };
