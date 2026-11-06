@@ -9,6 +9,9 @@
  *  - upper:     se guarda en MAYÚSCULAS
  *  - type:      'text' (default) | 'bool'
  *  - unique:    no se permiten duplicados (comparación sin mayúsculas/minúsculas)
+ *
+ * usedBy: tablas que usan el registro. Si está en uso, no se permite eliminarlo
+ * (varias de estas columnas no tienen llave foránea en la BD).
  */
 const { mysqlPool } = require('../config/db');
 
@@ -26,18 +29,21 @@ const CATALOGS = {
     table: 'TBL_PARENTESCOS',
     pk: 'ID_PARENTESCO',
     label: 'parentesco',
+    usedBy: [{ table: 'TBL_PERSONAS', label: 'residente(s)' }],
     fields: [{ name: 'DESCRIPCION', required: true, max: 150, unique: true }]
   },
   tipos_contacto: {
     table: 'TBL_TIPO_CONTACTO',
     pk: 'ID_TIPO_CONTACTO',
     label: 'tipo de contacto',
+    usedBy: [{ table: 'TBL_CONTACTOS', label: 'contacto(s)' }],
     fields: [{ name: 'DESCRIPCION', required: true, max: 100, unique: true }]
   },
   tipos_solicitud: {
     table: 'TBL_TIPO_SOLICITUD',
     pk: 'ID_TIPO_SOLICITUD',
     label: 'tipo de solicitud',
+    usedBy: [{ table: 'TBL_SOLICITUDES', label: 'solicitud(es)' }],
     fields: [
       { name: 'DESCRIPCION', required: true, max: 50, upper: true, unique: true },
       { name: 'DETALLE', max: 255 }
@@ -47,6 +53,7 @@ const CATALOGS = {
     table: 'TBL_TAMANO_PAQUETE',
     pk: 'ID_TAMANO_PAQUETE',
     label: 'tamaño de paquete',
+    usedBy: [{ table: 'TBL_PAQUETES', label: 'paquete(s)' }],
     fields: [
       { name: 'DESCRIPCION', required: true, max: 50, upper: true, unique: true },
       { name: 'DIMENSIONES_MAXIMAS', max: 100 },
@@ -57,12 +64,14 @@ const CATALOGS = {
     table: 'TBL_TIPO_CONDOMINIO',
     pk: 'ID_TIPO_CONDOMINIO',
     label: 'tipo de condominio',
+    usedBy: [{ table: 'TBL_CONDOMINIOS', label: 'condominio(s)' }],
     fields: [{ name: 'DESCRIPCION', required: true, max: 100, upper: true, unique: true }]
   },
   tipos_persona: {
     table: 'TBL_TIPO_PERSONAS',
     pk: 'ID_TIPO_PERSONA',
     label: 'tipo de persona',
+    usedBy: [{ table: 'TBL_PERSONAS', label: 'persona(s)' }],
     fields: [{ name: 'DESCRIPCION', required: true, max: 100, upper: true, unique: true }]
   }
 };
@@ -192,6 +201,19 @@ const deleteCatalog = async (req, res) => {
   let connection;
   try {
     connection = await mysqlPool.getConnection();
+
+    for (const ref of cfg.usedBy || []) {
+      const [[{ total }]] = await connection.query(
+        `SELECT COUNT(*) AS total FROM ${ref.table} WHERE ${cfg.pk} = ?`, [id]
+      );
+      if (Number(total) > 0) {
+        return res.status(409).json({
+          success: false,
+          message: `No se puede eliminar: este ${cfg.label} está asignado a ${total} ${ref.label}.`
+        });
+      }
+    }
+
     const [result] = await connection.query(`DELETE FROM ${cfg.table} WHERE ${cfg.pk} = ?`, [id]);
     if (result.affectedRows === 0) return res.status(404).json({ success: false, message: 'Registro no encontrado.' });
     res.status(200).json({ success: true, message: `Registro de ${cfg.label} eliminado con éxito.` });
