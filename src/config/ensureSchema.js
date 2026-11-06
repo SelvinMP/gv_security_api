@@ -5,6 +5,7 @@
  * Equivale a:
  *   - database/migrations/2026-11-06_cancelacion_visitas.sql
  *   - database/migrations/2026-11-07_auditoria.sql
+ *   - database/migrations/2026-11-08_politicas.sql
  */
 const { mysqlPool } = require('./db');
 
@@ -50,6 +51,62 @@ const TRIGGERS = [
   ['TRG_AUD_PERMISOS_DEL', 'BEFORE DELETE ON TBL_PERMISOS', permisoInsert('OLD', 'ELIMINACIÓN', flags('OLD'))],
 ];
 
+// ─── Políticas / reglamento de la residencial (opción B: política + roles destinatarios) ───
+const POLICY_TABLES = [
+  `CREATE TABLE IF NOT EXISTS TBL_CATEGORIA_POLITICA (
+     ID_CATEGORIA INT NOT NULL AUTO_INCREMENT,
+     DESCRIPCION VARCHAR(80) NOT NULL,
+     ORDEN INT NOT NULL DEFAULT 0,
+     PRIMARY KEY (ID_CATEGORIA),
+     UNIQUE KEY UQ_CATEGORIA_POLITICA (DESCRIPCION)
+   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS TBL_POLITICAS (
+     ID_POLITICA INT NOT NULL AUTO_INCREMENT,
+     TITULO VARCHAR(150) NOT NULL,
+     RESUMEN VARCHAR(300) NULL,
+     CONTENIDO MEDIUMTEXT NOT NULL,
+     ID_CATEGORIA INT NULL,
+     ARCHIVO_PDF VARCHAR(255) NULL COMMENT 'Ruta relativa del PDF adjunto (uploads/politicas/...)',
+     ESTADO ENUM('BORRADOR','PUBLICADA','ARCHIVADA') NOT NULL DEFAULT 'BORRADOR',
+     VIGENTE_DESDE DATE NULL,
+     VIGENTE_HASTA DATE NULL,
+     FECHA_PUBLICACION DATETIME NULL,
+     CREADO_POR INT NULL,
+     FECHA_CREACION DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+     MODIFICADO_POR INT NULL,
+     FECHA_MODIFICACION DATETIME NULL,
+     PRIMARY KEY (ID_POLITICA),
+     KEY IDX_POLITICA_ESTADO (ESTADO),
+     KEY IDX_POLITICA_CATEGORIA (ID_CATEGORIA),
+     CONSTRAINT FK_POLITICA_CATEGORIA FOREIGN KEY (ID_CATEGORIA) REFERENCES TBL_CATEGORIA_POLITICA (ID_CATEGORIA) ON DELETE SET NULL
+   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS TBL_POLITICA_ROL (
+     ID_POLITICA INT NOT NULL,
+     ID_ROL INT NOT NULL,
+     PRIMARY KEY (ID_POLITICA, ID_ROL),
+     KEY IDX_POLITICA_ROL_ROL (ID_ROL),
+     CONSTRAINT FK_POLROL_POLITICA FOREIGN KEY (ID_POLITICA) REFERENCES TBL_POLITICAS (ID_POLITICA) ON DELETE CASCADE,
+     CONSTRAINT FK_POLROL_ROL FOREIGN KEY (ID_ROL) REFERENCES TBL_MS_ROLES (ID_ROL)
+   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+];
+
+const DEFAULT_POLICY_CATEGORIES = [
+  'CONVIVENCIA Y RUIDO', 'MASCOTAS', 'ÁREAS COMUNES', 'SEGURIDAD Y ACCESO', 'VISITAS Y PROVEEDORES',
+  'MUDANZAS Y CONSTRUCCIÓN', 'ESTACIONAMIENTO', 'CUOTAS Y PAGOS', 'PROTOCOLOS DE CASETA',
+];
+
+const ensurePolicyTables = async () => {
+  for (const ddl of POLICY_TABLES) await mysqlPool.query(ddl);
+  const [[{ total }]] = await mysqlPool.query('SELECT COUNT(*) AS total FROM TBL_CATEGORIA_POLITICA');
+  if (Number(total) === 0) {
+    await mysqlPool.query(
+      'INSERT INTO TBL_CATEGORIA_POLITICA (DESCRIPCION, ORDEN) VALUES ?',
+      [DEFAULT_POLICY_CATEGORIES.map((d, i) => [d, i + 1])]
+    );
+    console.log('🛠️  Categorías de políticas iniciales creadas');
+  }
+};
+
 const ensureColumns = async () => {
   const names = [...new Set(REQUIRED_COLUMNS.map(c => c[1]))];
   const [rows] = await mysqlPool.query(
@@ -86,6 +143,12 @@ const ensureSchema = async () => {
     console.error('   Ejecute manualmente los scripts de database/migrations/');
   }
   try {
+    await ensurePolicyTables();
+  } catch (error) {
+    console.error('❌ No se pudieron crear las tablas de políticas / reglamento:', error.message);
+    console.error('   Ejecute manualmente database/migrations/2026-11-08_politicas.sql');
+  }
+  try {
     await ensureTriggers();
   } catch (error) {
     console.error('❌ No se pudieron crear los triggers de auditoría (roles / permisos):', error.message);
@@ -93,4 +156,4 @@ const ensureSchema = async () => {
   }
 };
 
-module.exports = { ensureSchema, TRIGGERS, REQUIRED_COLUMNS };
+module.exports = { ensureSchema, TRIGGERS, REQUIRED_COLUMNS, POLICY_TABLES, DEFAULT_POLICY_CATEGORIES };

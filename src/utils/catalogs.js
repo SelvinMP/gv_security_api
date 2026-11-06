@@ -67,6 +67,13 @@ const CATALOGS = {
     usedBy: [{ table: 'TBL_CONDOMINIOS', label: 'condominio(s)' }],
     fields: [{ name: 'DESCRIPCION', required: true, max: 100, upper: true, unique: true }]
   },
+  categorias_politica: {
+    table: 'TBL_CATEGORIA_POLITICA',
+    pk: 'ID_CATEGORIA',
+    label: 'categoría de política',
+    usedBy: [{ table: 'TBL_POLITICAS', label: 'política(s)' }],
+    fields: [{ name: 'DESCRIPCION', required: true, max: 80, upper: true, unique: true }]
+  },
   tipos_persona: {
     table: 'TBL_TIPO_PERSONAS',
     pk: 'ID_TIPO_PERSONA',

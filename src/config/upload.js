@@ -39,4 +39,27 @@ const uploadAnuncio = multer({
   }
 });
 
-module.exports = { uploadAnuncio, uploadDir };
+// ─── PDF de políticas / reglamento ───
+// Fuera de /uploads (que es público): se sirven por /api/politicas/:id/pdf validando el rol.
+const policyDir = path.join(__dirname, '../../storage/politicas');
+if (!fs.existsSync(policyDir)) {
+  fs.mkdirSync(policyDir, { recursive: true });
+}
+
+const uploadPolitica = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, policyDir),
+    filename: (req, file, cb) => {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e6);
+      cb(null, `politica_${uniqueSuffix}.pdf`);
+    }
+  }),
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (ext === '.pdf' && (!file.mimetype || file.mimetype === 'application/pdf')) cb(null, true);
+    else cb(new Error('Solo se permiten archivos PDF.'), false);
+  },
+  limits: { fileSize: 10 * 1024 * 1024 } // 10 MB
+});
+
+module.exports = { uploadAnuncio, uploadDir, uploadPolitica, policyDir };
