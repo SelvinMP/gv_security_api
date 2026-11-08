@@ -3,6 +3,7 @@ const bcrypt = require('bcrypt');
 const moment = require('moment-timezone');
 const catalogs = require('../utils/catalogs');
 const { ACCION, logUsuario, logPersona, logParametro } = require('../utils/audit');
+const { notifyAdminsNewReservation } = require('../utils/reservationNotify');
 
 // Misma consulta que la "fotografía previa" de updateMaintenanceRecord (usuarios)
 const SNAPSHOT_USUARIO_SQL = `
@@ -1118,6 +1119,7 @@ const createMaintenanceRecord = async (req, res) => {
   }
 
   let connection;
+  let newReservationId = null; // para avisar a los administradores después del commit
 
   try {
     connection = await mysqlPool.getConnection();
@@ -1340,7 +1342,7 @@ const createMaintenanceRecord = async (req, res) => {
         if (!ID_USUARIO || !ID_INSTALACION || !FECHA_RESERVA || !HORA_INICIO || !HORA_FINAL) {
           return res.status(400).json({ success: false, message: 'Usuario, instalación, fecha y horarios son requeridos.' });
         }
-        await connection.query(`
+        const [resvResult] = await connection.query(`
           INSERT INTO TBL_RESERVAS (ID_USUARIO, ID_INSTALACION, ID_ESTADO_RESERVA, TIPO_EVENTO, NUM_INVITADO, NOTAS, FECHA_RESERVA, HORA_INICIO, HORA_FINAL)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
         `, [
@@ -1354,6 +1356,7 @@ const createMaintenanceRecord = async (req, res) => {
           HORA_INICIO,
           HORA_FINAL
         ]);
+        newReservationId = resvResult.insertId;
         break;
       }
 
@@ -1381,6 +1384,8 @@ const createMaintenanceRecord = async (req, res) => {
 
     await connection.commit();
     res.status(201).json({ success: true, message: `Nuevo registro creado con éxito en ${table}.` });
+
+    if (newReservationId) notifyAdminsNewReservation(newReservationId, { origen: 'panel' });
 
   } catch (error) {
     if (connection) await connection.rollback();

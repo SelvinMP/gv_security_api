@@ -1,4 +1,5 @@
 const { mysqlPool } = require('../config/db');
+const { notifyAdminsNewReservation } = require('../utils/reservationNotify');
 
 /**
  * Obtiene todas las instalaciones disponibles.
@@ -61,12 +62,15 @@ const createReservation = async (req, res) => {
       ) VALUES (?, ?, 3, ?, ?, ?, ?, ?, ?)
     `;
 
-    await connection.query(insertQuery, [
+    const [insertResult] = await connection.query(insertQuery, [
       idUsuario, idInstalacion, tipoEvento, 
       numInvitado, notas, fechaReserva, horaInicio, horaFinal
     ]);
 
     res.status(201).json({ message: "Reservación creada exitosamente" });
+
+    // Aviso por correo a los administradores (rol 4), sin demorar la respuesta al residente
+    notifyAdminsNewReservation(insertResult.insertId, { origen: 'app' });
   } catch (error) {
     console.error("Error al crear reservación:", error);
     res.status(500).json({ message: "Error interno al crear reservación" });

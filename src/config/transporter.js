@@ -53,7 +53,7 @@ const parseFrom = (from) => {
 };
 
 const toList = (to) =>
-  String(to)
+  (Array.isArray(to) ? to.join(',') : String(to || ''))
     .split(',')
     .map((e) => e.trim())
     .filter(Boolean)
@@ -66,6 +66,9 @@ const sendViaBrevo = async (mailOptions) => {
     to: toList(mailOptions.to),
     subject: mailOptions.subject,
   };
+  // Copias (CC / BCC): la API de Brevo las recibe como listas aparte
+  if (mailOptions.cc) body.cc = toList(mailOptions.cc);
+  if (mailOptions.bcc) body.bcc = toList(mailOptions.bcc);
   if (mailOptions.html) body.htmlContent = mailOptions.html;
   if (mailOptions.text) body.textContent = mailOptions.text;
   if (!body.htmlContent && !body.textContent) body.textContent = ' ';

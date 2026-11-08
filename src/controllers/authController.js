@@ -29,6 +29,18 @@ const decrypt = (encryptedHex) => {
   }
 };
 
+/**
+ * Bloque HTML del código de verificación, pensado para copiar y pegar:
+ * - sin espacios entre caracteres (letter-spacing es solo visual, al copiar sale "A1B2C3");
+ * - "user-select: all": un toque / doble clic selecciona el código completo;
+ * - el código también va en el asunto, para copiarlo desde la notificación del teléfono.
+ */
+const codeBlockHtml = (code) => `
+  <div style="background-color: #0E2041; border-radius: 8px; padding: 18px; text-align: center; margin: 25px 0;">
+    <span style="font-size: 34px; font-weight: bold; color: #d4af37; letter-spacing: 8px; font-family: monospace; user-select: all; -webkit-user-select: all;">${code}</span>
+  </div>
+  <p style="color: #888888; font-size: 12px; text-align: center; margin: -12px 0 20px;">Mantén presionado (o haz doble clic) sobre el código para copiarlo y pégalo en la app.</p>`;
+
 // Genera un código OTP de 6 caracteres con fecha de expiración (por defecto 10 minutos)
 const generateVerificationPayload = (codeLength = 6, expirationMinutes = 10) => {
   const code = crypto.randomBytes(3).toString("hex").toUpperCase();
@@ -125,7 +137,7 @@ const register = async (req, res) => {
     const mailOptions = {
       from: `"GV-Security Support" <${process.env.EMAIL_USER}>`,
       to: EMAIL,
-      subject: "Código de Verificación - Registro GV-Security",
+      subject: `${verificationCode} es tu código de verificación - GV-Security`,
       html: `
         <div style="font-family: Arial, sans-serif; background-color: #f4f6f8; padding: 30px;">
           <div style="max-width: 500px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; padding: 30px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-top: 5px solid #0E2041;">
@@ -133,9 +145,7 @@ const register = async (req, res) => {
             <h3 style="color: #333333; font-size: 18px; margin-bottom: 10px;">Verifica tu correo electrónico</h3>
             <p style="color: #555555; font-size: 14px; line-height: 1.6;">Hola <strong>${NOMBRE_USUARIO}</strong>,</p>
             <p style="color: #555555; font-size: 14px; line-height: 1.6;">Gracias por registrarte en <strong>GV-Security</strong>. Usa el siguiente código para completar la verificación de tu cuenta:</p>
-            <div style="background-color: #0E2041; border-radius: 8px; padding: 18px; text-align: center; margin: 25px 0;">
-              <span style="font-size: 34px; font-weight: bold; color: #d4af37; letter-spacing: 8px; font-family: monospace;">${verificationCode}</span>
-            </div>
+            ${codeBlockHtml(verificationCode)}
             <p style="color: #888888; font-size: 13px; text-align: center;">⏱️ Este código es válido durante <strong>10 minutos</strong> y es de un solo uso.</p>
             <hr style="border: none; border-top: 1px solid #eeeeee; margin: 25px 0;" />
             <p style="color: #999999; font-size: 12px; text-align: center; margin-bottom: 0;">Si no solicitaste este registro, puedes ignorar este mensaje de forma segura.</p>
@@ -224,7 +234,7 @@ const login = async (req, res) => {
       const mailOptions = {
         from: `"GV-Security Support" <${process.env.EMAIL_USER}>`,
         to: username,
-        subject: "Código de Verificación 2FA - GV-Security",
+        subject: `${verificationCode} es tu código 2FA - GV-Security`,
         html: `
           <div style="font-family: Arial, sans-serif; background-color: #f4f6f8; padding: 30px;">
             <div style="max-width: 500px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; padding: 30px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-top: 5px solid #0E2041;">
@@ -232,9 +242,7 @@ const login = async (req, res) => {
               <h3 style="color: #333333; font-size: 18px; margin-bottom: 10px;">Autenticación en Dos Pasos (2FA)</h3>
               <p style="color: #555555; font-size: 14px; line-height: 1.6;">Hola,</p>
               <p style="color: #555555; font-size: 14px; line-height: 1.6;">Se ha detectado un intento de inicio de sesión en tu cuenta. Usa el siguiente código de seguridad para confirmar tu acceso:</p>
-              <div style="background-color: #0E2041; border-radius: 8px; padding: 18px; text-align: center; margin: 25px 0;">
-                <span style="font-size: 34px; font-weight: bold; color: #d4af37; letter-spacing: 8px; font-family: monospace;">${verificationCode}</span>
-              </div>
+              ${codeBlockHtml(verificationCode)}
               <p style="color: #888888; font-size: 13px; text-align: center;">⏱️ Este código es válido durante <strong>10 minutos</strong> y es de un solo uso.</p>
               <hr style="border: none; border-top: 1px solid #eeeeee; margin: 25px 0;" />
               <p style="color: #e53e3e; font-size: 12px; text-align: center; margin-bottom: 0;">Si tú no intentaste iniciar sesión, te recomendamos cambiar tu contraseña de inmediato.</p>
@@ -696,7 +704,7 @@ const resendVerificationCode = async (req, res) => {
       [encryptedCode, user.ID_USUARIO]
     );
 
-    const subject = is2FA ? "Nuevo Código de Verificación 2FA - GV-Security" : "Nuevo Código de Verificación - Registro GV-Security";
+    const subject = is2FA ? `${newCode} es tu nuevo código 2FA - GV-Security` : `${newCode} es tu nuevo código de verificación - GV-Security`;
     const title = is2FA ? "Autenticación en Dos Pasos (2FA)" : "Verifica tu correo electrónico";
     const desc = is2FA 
       ? "Tu nuevo código de seguridad para acceder a tu cuenta es:" 
@@ -712,9 +720,7 @@ const resendVerificationCode = async (req, res) => {
             <h2 style="color: #0E2041; margin-top: 0; font-size: 24px; text-align: center; font-weight: 800;">GV-Security</h2>
             <h3 style="color: #333333; font-size: 18px; margin-bottom: 10px;">${title}</h3>
             <p style="color: #555555; font-size: 14px; line-height: 1.6;">${desc}</p>
-            <div style="background-color: #0E2041; border-radius: 8px; padding: 18px; text-align: center; margin: 25px 0;">
-              <span style="font-size: 34px; font-weight: bold; color: #d4af37; letter-spacing: 8px; font-family: monospace;">${newCode}</span>
-            </div>
+            ${codeBlockHtml(newCode)}
             <p style="color: #888888; font-size: 13px; text-align: center;">⏱️ Este código es válido durante <strong>10 minutos</strong> y es de un solo uso.</p>
             <hr style="border: none; border-top: 1px solid #eeeeee; margin: 25px 0;" />
             <p style="color: #999999; font-size: 12px; text-align: center; margin-bottom: 0;">Si no solicitaste este código, puedes ignorar este mensaje de forma segura.</p>
@@ -1056,11 +1062,11 @@ const enviarCodigoRecuperacion = async (req, res) => {
     const mailOptions = {
       from: `"GV-Security Support" <${process.env.EMAIL_USER}>`,
       to: email,
-      subject: "Recuperación de Contraseña",
+      subject: `${verificationCode} es tu código de recuperación - GV-Security`,
       html: `<div style="font-family: sans-serif; padding: 20px; border: 1px solid #ddd;">
           <h2>Recuperación de Contraseña</h2>
           <p>Has solicitado restablecer tu contraseña. Tu código de verificación es:</p>
-          <p style="font-size: 32px; font-weight: bold; color: #d4af37; letter-spacing: 5px;">${verificationCode}</p>
+          ${codeBlockHtml(verificationCode)}
           <p>Si no solicitaste este cambio, puedes ignorar este correo.</p>
         </div>`
     };
