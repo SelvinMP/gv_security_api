@@ -87,17 +87,18 @@ const validateEventInput = (body) => {
   };
 };
 
-// POST /api/eventos
-const createEvent = async (req, res) => {
-  const usuarioId = getRequestUserId(req);
-  let connection;
-  try {
-    connection = await mysqlPool.getConnection();
+/**
+ * Valida y registra una visita grupal (QR múltiple) con sus invitados.
+ * La usan el formulario de la app (createEvent) y el asistente de IA; quien llama
+ * debe hacer rollback si lanza un error.
+ * Devuelve { status, message } si no se pudo, o { qrCode, qrData, evento } si se creó.
+ */
+const insertEvent = async (connection, usuarioId, body) => {
     const residente = await getResidentInfo(connection, usuarioId);
-    if (!residente || !residente.ID_PERSONA) return res.status(404).json({ message: 'Datos del residente no encontrados' });
+    if (!residente || !residente.ID_PERSONA) return { status: 404, message: 'Datos del residente no encontrados' };
 
-    const { error, data } = validateEventInput(req.body);
-    if (error) return res.status(400).json({ message: error });
+    const { error, data } = validateEventInput(body);
+    if (error) return { status: 400, message: error };
 
     await connection.beginTransaction();
     const [result] = await connection.query(
@@ -114,7 +115,18 @@ const createEvent = async (req, res) => {
 
     const evento = await getEventWithGuests(connection, idEvento);
     const { qrCode } = await buildEncryptedQR(QR_TYPES.EVENTO, idEvento, { d: data.FECHA_EVENTO });
-    res.status(201).json({ success: true, message: 'QR múltiple generado', qrCode, qrData: buildEventCard(evento, qrCode), evento });
+    return { qrCode, qrData: buildEventCard(evento, qrCode), evento };
+};
+
+// POST /api/eventos
+const createEvent = async (req, res) => {
+  const usuarioId = getRequestUserId(req);
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const result = await insertEvent(connection, usuarioId, req.body);
+    if (result.status) return res.status(result.status).json({ message: result.message });
+    res.status(201).json({ success: true, message: 'QR múltiple generado', qrCode: result.qrCode, qrData: result.qrData, evento: result.evento });
   } catch (error) {
     if (connection) await connection.rollback().catch(() => {});
     console.error('Error createEvent:', error);
@@ -268,6 +280,7 @@ const deleteEvent = async (req, res) => {
 };
 
 module.exports = {
+  insertEvent,
   createEvent,
   getUserEvents,
   updateEvent,

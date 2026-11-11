@@ -77,17 +77,17 @@ const getPackageSizes = async (req, res) => {
   }
 };
 
-// POST /api/paquetes
-const createPackage = async (req, res) => {
-  const usuarioId = getRequestUserId(req);
-  let connection;
-  try {
-    connection = await mysqlPool.getConnection();
+/**
+ * Valida y registra un paquete y genera su QR cifrado.
+ * Lo usan el formulario de la app (createPackage) y el asistente de IA.
+ * Devuelve { status, message } si no se pudo, o { qrCode, qrData } si se creó.
+ */
+const insertPackage = async (connection, usuarioId, body) => {
     const residente = await getResidentInfo(connection, usuarioId);
-    if (!residente || !residente.ID_PERSONA) return res.status(404).json({ message: 'Datos del residente no encontrados' });
+    if (!residente || !residente.ID_PERSONA) return { status: 404, message: 'Datos del residente no encontrados' };
 
-    const { error, data } = await validatePackageInput(connection, req.body);
-    if (error) return res.status(400).json({ message: error });
+    const { error, data } = await validatePackageInput(connection, body);
+    if (error) return { status: 400, message: error };
 
     const [result] = await connection.query(
       `INSERT INTO TBL_PAQUETES
@@ -100,11 +100,23 @@ const createPackage = async (req, res) => {
     const paquete = await getPackageWithDetails(connection, result.insertId);
     const { qrCode } = await buildEncryptedQR(QR_TYPES.PAQUETE, paquete.ID_PAQUETE);
 
+    return { qrCode, qrData: buildPackageCard(paquete, residente, qrCode) };
+};
+
+// POST /api/paquetes
+const createPackage = async (req, res) => {
+  const usuarioId = getRequestUserId(req);
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const result = await insertPackage(connection, usuarioId, req.body);
+    if (result.status) return res.status(result.status).json({ message: result.message });
+
     res.status(201).json({
       success: true,
       message: 'QR de paquete generado',
-      qrCode,
-      qrData: buildPackageCard(paquete, residente, qrCode)
+      qrCode: result.qrCode,
+      qrData: result.qrData
     });
   } catch (error) {
     console.error('Error createPackage:', error);
@@ -226,6 +238,7 @@ const deletePackage = async (req, res) => {
 };
 
 module.exports = {
+  insertPackage,
   getPackageSizes,
   createPackage,
   getUserPackages,

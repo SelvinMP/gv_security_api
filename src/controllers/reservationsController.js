@@ -27,17 +27,12 @@ const getInstallations = async (req, res) => {
 /**
  * Crea una nueva reservación validando disponibilidad.
  */
-const createReservation = async (req, res) => {
-  const { idUsuario, idInstalacion, tipoEvento, numInvitado, notas, fechaReserva, horaInicio, horaFinal } = req.body;
-
-  if (!idUsuario || !idInstalacion || !fechaReserva || !horaInicio || !horaFinal) {
-    return res.status(400).json({ message: "Datos obligatorios incompletos" });
-  }
-
-  let connection;
-  try {
-    connection = await mysqlPool.getConnection();
-
+/**
+ * Valida disponibilidad e inserta la reservación (estado Pendiente) y avisa a los administradores.
+ * La usan el formulario de la app (createReservation) y el asistente de IA.
+ * Devuelve { conflict: true } si el horario ya está ocupado, o { id } si se creó.
+ */
+const insertReservation = async (connection, { idUsuario, idInstalacion, tipoEvento, numInvitado, notas, fechaReserva, horaInicio, horaFinal }) => {
     // Validar traslapes
     const checkQuery = `
       SELECT * FROM TBL_RESERVAS 
@@ -50,9 +45,7 @@ const createReservation = async (req, res) => {
 
     const [overlaps] = await connection.query(checkQuery, [idInstalacion, fechaReserva, horaFinal, horaInicio]);
 
-    if (overlaps.length > 0) {
-      return res.status(409).json({ message: "La instalación ya está reservada en ese horario." });
-    }
+    if (overlaps.length > 0) return { conflict: true };
 
     // Insertar reservación (Estado 3 = Pendiente)
     const insertQuery = `
@@ -67,10 +60,26 @@ const createReservation = async (req, res) => {
       numInvitado, notas, fechaReserva, horaInicio, horaFinal
     ]);
 
-    res.status(201).json({ message: "Reservación creada exitosamente" });
-
     // Aviso por correo a los administradores (rol 4), sin demorar la respuesta al residente
     notifyAdminsNewReservation(insertResult.insertId, { origen: 'app' });
+    return { id: insertResult.insertId };
+};
+
+const createReservation = async (req, res) => {
+  const { idUsuario, idInstalacion, fechaReserva, horaInicio, horaFinal } = req.body;
+
+  if (!idUsuario || !idInstalacion || !fechaReserva || !horaInicio || !horaFinal) {
+    return res.status(400).json({ message: "Datos obligatorios incompletos" });
+  }
+
+  let connection;
+  try {
+    connection = await mysqlPool.getConnection();
+    const result = await insertReservation(connection, req.body);
+    if (result.conflict) {
+      return res.status(409).json({ message: "La instalación ya está reservada en ese horario." });
+    }
+    res.status(201).json({ message: "Reservación creada exitosamente" });
   } catch (error) {
     console.error("Error al crear reservación:", error);
     res.status(500).json({ message: "Error interno al crear reservación" });
@@ -114,6 +123,7 @@ const getUserReservations = async (req, res) => {
 
 
 module.exports = {
+  insertReservation,
   getInstallations,
   createReservation,
   getUserReservations
