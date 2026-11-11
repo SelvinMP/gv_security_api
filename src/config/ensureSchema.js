@@ -6,6 +6,7 @@
  *   - database/migrations/2026-11-06_cancelacion_visitas.sql
  *   - database/migrations/2026-11-07_auditoria.sql
  *   - database/migrations/2026-11-08_politicas.sql
+ *   - database/migrations/2026-11-10_inteligencia_artificial.sql
  */
 const { mysqlPool } = require('./db');
 
@@ -107,6 +108,26 @@ const ensurePolicyTables = async () => {
   }
 };
 
+// ─── Inteligencia Artificial: registro de consultas (topes mensual/diario y reporte de consumo) ───
+const AI_TABLES = [
+  `CREATE TABLE IF NOT EXISTS TBL_IA_USO (
+     ID_USO INT NOT NULL AUTO_INCREMENT,
+     ID_USUARIO INT NULL,
+     FUNCION VARCHAR(30) NOT NULL COMMENT 'reglamento, asistente, fotos',
+     MODELO VARCHAR(60) NOT NULL,
+     TOKENS_ENTRADA INT NOT NULL DEFAULT 0,
+     TOKENS_SALIDA INT NOT NULL DEFAULT 0,
+     FECHA DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+     PRIMARY KEY (ID_USO),
+     KEY IDX_IA_USO_FECHA (FECHA),
+     KEY IDX_IA_USO_USUARIO_FECHA (ID_USUARIO, FECHA)
+   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+];
+
+const ensureAITables = async () => {
+  for (const ddl of AI_TABLES) await mysqlPool.query(ddl);
+};
+
 const ensureColumns = async () => {
   const names = [...new Set(REQUIRED_COLUMNS.map(c => c[1]))];
   const [rows] = await mysqlPool.query(
@@ -147,6 +168,12 @@ const ensureSchema = async () => {
   } catch (error) {
     console.error('❌ No se pudieron crear las tablas de políticas / reglamento:', error.message);
     console.error('   Ejecute manualmente database/migrations/2026-11-08_politicas.sql');
+  }
+  try {
+    await ensureAITables();
+  } catch (error) {
+    console.error('❌ No se pudo crear la tabla de consumo de inteligencia artificial:', error.message);
+    console.error('   Ejecute manualmente database/migrations/2026-11-10_inteligencia_artificial.sql');
   }
   try {
     await ensureTriggers();

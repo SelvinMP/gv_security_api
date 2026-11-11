@@ -348,6 +348,7 @@ const adminUpdateRequest = async (req, res) => {
 };
 
 module.exports = {
+  getRequestDetail,
   getCatalogs,
   createRequest,
   getMyRequests,

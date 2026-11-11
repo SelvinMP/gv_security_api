@@ -25,6 +25,7 @@ const packageRoutes = require('./routes/packageRoutes');
 const eventRoutes = require('./routes/eventRoutes');
 const requestRoutes = require('./routes/requestRoutes');
 const politicaRoutes = require('./routes/politicaRoutes');
+const iaRoutes = require('./routes/iaRoutes');
 
 const app = express();
 
@@ -62,6 +63,7 @@ app.use('/api/paquetes', packageRoutes);
 app.use('/api/eventos', eventRoutes);
 app.use('/api/solicitudes', requestRoutes);
 app.use('/api/politicas', politicaRoutes);
+app.use('/api/ia', iaRoutes);
 app.use('/api', notificationRoutes);
 // Compatibilidad directa para llamadas móviles sin prefijo /api/auth
 app.use('/', authRoutes);

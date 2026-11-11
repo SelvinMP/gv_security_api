@@ -62,6 +62,22 @@ const readerFilter = (req) => {
   };
 };
 
+/**
+ * Políticas publicadas y vigentes que puede leer un rol (los administradores leen todas).
+ * Lo usa el módulo de IA para responder preguntas sobre el reglamento.
+ */
+const listPoliticasParaRol = async (role) => {
+  const admin = ADMIN_ROLES.includes(Number(role));
+  const sql = admin
+    ? VIGENTE_SQL
+    : `${VIGENTE_SQL} AND EXISTS (SELECT 1 FROM TBL_POLITICA_ROL x WHERE x.ID_POLITICA = p.ID_POLITICA AND x.ID_ROL = ?)`;
+  const [rows] = await mysqlPool.query(
+    `${BASE_SELECT} WHERE ${sql} GROUP BY p.ID_POLITICA ORDER BY ORDEN_CATEGORIA IS NULL, ORDEN_CATEGORIA, p.TITULO`,
+    admin ? [] : [Number(role)]
+  );
+  return rows.map(normalize);
+};
+
 const fail = (res, err, msg) => {
   console.error(msg, err);
   res.status(500).json({ success: false, message: msg });
@@ -376,6 +392,7 @@ const removePdf = (name) => {
 };
 
 module.exports = {
+  listPoliticasParaRol,
   getCategorias,
   getPoliticas,
   getPolitica,

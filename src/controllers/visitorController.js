@@ -8,21 +8,19 @@ const parsePersonas = (value, fallback) => {
   return Number.isFinite(n) && n > 0 ? n : (Number(fallback) > 0 ? Number(fallback) : 1);
 };
 
-const registerVisit = async (req, res) => {
-  const {
-    usuarioId,
-    NOMBRE_VISITANTE,
-    NUM_PERSONAS,
-    NOTA,
-    isRecurrentVisitor,
-    FECHA_VENCIMIENTO,
-  } = req.body;
-  
-  let connection;
-
-  try {
-    connection = await mysqlPool.getConnection();
-
+/**
+ * Registra una visita (normal o recurrente) y devuelve su QR cifrado.
+ * Lo usan el formulario de la app (registerVisit) y el asistente de IA.
+ * Devuelve null si no existen los datos del residente.
+ */
+const createVisit = async (connection, {
+  usuarioId,
+  NOMBRE_VISITANTE,
+  NUM_PERSONAS,
+  NOTA,
+  isRecurrentVisitor,
+  FECHA_VENCIMIENTO,
+}) => {
     // Obtener info del residente/usuario
     const [personaResults] = await connection.query(
       `SELECT p.ID_PERSONA, u.NOMBRE_USUARIO AS NOMBRE_PERSONA, p.DNI_PERSONA, p.NUM_CARNET_EXTRANJERO, c.DESCRIPCION AS CONTACTO, d.DESCRIPCION AS ID_CONDOMINIO 
@@ -35,9 +33,7 @@ const registerVisit = async (req, res) => {
     );
 
 
-    if (personaResults.length === 0) {
-      return res.status(404).json({ error: "Datos del residente no encontrados" });
-    }
+    if (personaResults.length === 0) return null;
 
     const personaInfo = personaResults[0];
     const ID_PERSONA = personaInfo.ID_PERSONA;
@@ -93,13 +89,24 @@ const registerVisit = async (req, res) => {
 
     const { qrCode: qrUrl } = await buildEncryptedQR(isRecurrentVisitor ? QR_TYPES.RECURRENTE : QR_TYPES.VISITA, ID_VISITANTE);
 
-    res.status(201).json({
+    return {
       success: true,
       message: isRecurrentVisitor ? "Visitante recurrente registrado" : "Visita registrada",
       qrCode: qrUrl,
       qrData: qrData,
-    });
+    };
+};
 
+const registerVisit = async (req, res) => {
+  let connection;
+
+  try {
+    connection = await mysqlPool.getConnection();
+    const result = await createVisit(connection, req.body);
+    if (!result) {
+      return res.status(404).json({ error: "Datos del residente no encontrados" });
+    }
+    res.status(201).json(result);
   } catch (error) {
     console.error("Error en registro:", error);
     res.status(500).json({ message: "Error interno del servidor" });
@@ -556,7 +563,8 @@ const getResidentQR = async (req, res) => {
 
 module.exports = { 
   getResidentQR,
-  registerVisit, 
+  createVisit,
+  registerVisit,
   validateQR, 
   getVisitorHistory, 
   deleteVisitor, 
