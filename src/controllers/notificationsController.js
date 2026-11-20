@@ -1,14 +1,12 @@
 const { mysqlPool } = require('../config/db');
+const { canAccessUser, denyAccess } = require('../utils/access');
 
 /**
  * Obtiene todos los anuncios y eventos que no han sido ocultados por el usuario.
  */
 const getAnnouncements = async (req, res) => {
-  const usuarioId = req.query.usuario_id;
-
-  if (!usuarioId) {
-    return res.status(400).json({ message: "El ID de usuario es requerido" });
-  }
+  // El usuario es el de la sesión (la ruta exige authenticateToken); el ?usuario_id de la URL se ignora
+  const usuarioId = req.user.id;
 
   const query = `
     SELECT ID_ANUNCIOS_EVENTOS, TITULO, DESCRIPCION, IMAGEN, FECHA_HORA 
@@ -38,10 +36,12 @@ const getAnnouncements = async (req, res) => {
  * Inserta un registro para ocultar un anuncio para un usuario específico.
  */
 const hideAnnouncement = async (req, res) => {
-  const { usuarioId, anuncioId } = req.body;
+  // El usuario es el de la sesión (la ruta exige authenticateToken), no el que diga el body
+  const usuarioId = req.user.id;
+  const { anuncioId } = req.body;
 
-  if (!usuarioId || !anuncioId) {
-    return res.status(400).json({ message: "Datos incompletos (usuarioId, anuncioId)" });
+  if (!anuncioId) {
+    return res.status(400).json({ message: "Datos incompletos (anuncioId)" });
   }
 
   const query = `
@@ -72,9 +72,11 @@ const getPersonalNotifications = async (req, res) => {
   if (!usuarioId) {
     return res.status(400).json({ message: "El ID de usuario es requerido" });
   }
+  // Avisos de visitas y paquetes: privados de cada residente
+  if (!canAccessUser(req, usuarioId)) return denyAccess(res);
 
   const query = `
-    SELECT ID_NOTIFICACION, TITULO, MENSAJE as DESCRIPCION, FECHA_HORA, LEIDA 
+    SELECT ID_NOTIFICACION, TITULO, MENSAJE as DESCRIPCION, FECHA_HORA, LEIDA
     FROM TBL_NOTIFICACIONES_APP 
     WHERE ID_USUARIO = ? 
     ORDER BY FECHA_HORA DESC`;

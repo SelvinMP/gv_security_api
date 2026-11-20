@@ -6,8 +6,28 @@ const jwt = require('jsonwebtoken');
 // Firebase Admin se inicializa una sola vez en config/firebase.js
 const { sendPush, isPushReady, getPushInitError } = require('../config/firebase');
 const SECRET_KEY = process.env.SECRET_KEY || 'your_secret_key';
-const { ACCION, logUsuario, logPersona, logContrasena } = require('../utils/audit');
+const { ACCION, clientInfo, logUsuario, logPersona, logContrasena } = require('../utils/audit');
+const { signPurposeToken, verifyPurposeToken, bearerToken, passwordFingerprint } = require('../utils/authTokens');
+const { consumeRateLimit, tooManyRequests } = require('../utils/rateLimit');
+const { isPasswordBreached } = require('../utils/breachedPasswords');
+const { isAdminRequest, canAccessUser, denyAccess } = require('../utils/access');
+const { hashDeviceId, describeDevice, startSession, endSession, forgetSession } = require('../utils/sessions');
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || '00'.repeat(32);
+
+// Vigencias de los pasos intermedios de autenticación
+const PRE2FA_TOKEN_TTL = '30m';        // tiempo para escribir el código 2FA (alcanza para reenviarlo)
+const RESET_TOKEN_TTL = '15m';         // tiempo para escribir la nueva contraseña tras validar el código
+const RECOVERY_CODE_MINUTES = 15;      // vigencia del código de recuperación enviado al correo
+const MAX_CODE_ATTEMPTS = 5;           // intentos por código de recuperación antes de anularlo
+
+// Recuperación de contraseña
+const MINUTE_MS = 60 * 1000;
+const RECOVERY_ALLOWED_STATES = [1, 3]; // activo, o bloqueado (cambiar la contraseña no lo desbloquea)
+const RECOVERY_SENT_MESSAGE = "Si el correo está registrado, te enviamos un código. Revisa también la carpeta de spam.";
+const RECOVERY_INVALID_CODE_MESSAGE = "El código no es válido o ya venció. Solicita uno nuevo.";
+
+const normalizeEmail = (value) => (typeof value === 'string' ? value.trim().toLowerCase() : '');
+const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 // Helper para cifrar (usado en registro y 2FA)
 const encrypt = (text) => {
@@ -75,13 +95,63 @@ const validateVerificationCode = (inputCode, storedEncrypted) => {
     }
   }
 
-  // 2. Compatibilidad con formato anterior cifrado directo
+  // 2. Compatibilidad con formato anterior cifrado directo (sin vencimiento)
   const legacyEncrypted = encrypt(cleanInput);
   if (storedEncrypted === legacyEncrypted) {
-    return { valid: true, expired: false };
+    return { valid: true, expired: false, legacy: true };
   }
 
   return { valid: false, expired: false, reason: "Código de verificación incorrecto" };
+};
+
+/**
+ * Cuenta un intento fallido dentro del propio código (CODIGO:VENCE:FALLOS). Al llegar al máximo
+ * el código se anula y hay que pedir otro: no se puede adivinar por fuerza bruta y tampoco se
+ * bloquea la cuenta del dueño por intentos ajenos. Devuelve cuántos intentos quedan.
+ */
+const registerFailedCodeAttempt = async (connection, userId, storedEncrypted) => {
+  const [code, expiresAt, failsStr] = (decrypt(storedEncrypted) || '').split(':');
+  const fails = (parseInt(failsStr, 10) || 0) + 1;
+  const next = code && expiresAt && fails < MAX_CODE_ATTEMPTS ? encrypt(`${code}:${expiresAt}:${fails}`) : null;
+  // Solo si el código no cambió mientras tanto (por ejemplo, porque se pidió uno nuevo)
+  await connection.query(
+    "UPDATE TBL_MS_USUARIO SET CODIGO_VERIFICACION = ? WHERE ID_USUARIO = ? AND CODIGO_VERIFICACION = ?",
+    [next, userId, storedEncrypted]
+  );
+  return next ? MAX_CODE_ATTEMPTS - fails : 0;
+};
+
+/**
+ * Aprobar o rechazar una solicitud de acceso: solo si sigue pendiente (estados 4 y 5) y quien la
+ * gestiona es administrador o un residente activo de la misma casa. Nadie gestiona la suya.
+ * Devuelve null si está permitido, o { status, message } con el motivo del rechazo.
+ */
+const checkRequestPermission = async (connection, req, targetUsuarioId) => {
+  if (String(req.user?.id) === String(targetUsuarioId)) {
+    return { status: 403, message: "No puedes aprobar ni rechazar tu propia solicitud." };
+  }
+
+  const userStateQuery = `
+    SELECT u.ID_ESTADO_USUARIO, p.ID_CONDOMINIO
+    FROM TBL_MS_USUARIO u
+    LEFT JOIN TBL_PERSONAS p ON p.ID_USUARIO = u.ID_USUARIO
+    WHERE u.ID_USUARIO = ?`;
+
+  const [targetRows] = await connection.query(userStateQuery, [targetUsuarioId]);
+  if (targetRows.length === 0) return { status: 404, message: "Solicitud no encontrada." };
+  if (![4, 5].includes(Number(targetRows[0].ID_ESTADO_USUARIO))) {
+    return { status: 409, message: "Esta solicitud ya no está pendiente." };
+  }
+
+  if (isAdminRequest(req)) return null;
+
+  const [requesterRows] = await connection.query(userStateQuery, [req.user.id]);
+  const requester = requesterRows[0];
+  const targetCondo = targetRows[0].ID_CONDOMINIO;
+  if (!requester || Number(requester.ID_ESTADO_USUARIO) !== 1 || !targetCondo || String(requester.ID_CONDOMINIO) !== String(targetCondo)) {
+    return { status: 403, message: "Solo puedes gestionar solicitudes de tu propia casa." };
+  }
+  return null;
 };
 
 const register = async (req, res) => {
@@ -182,6 +252,120 @@ const register = async (req, res) => {
   }
 };
 
+// Estados que no pueden iniciar sesión: 2 inactivo, 3 bloqueado, 4 pendiente de activación, 5 sin verificar
+const DISABLED_STATES = [2, 3, 4, 5];
+
+/** Lee el estado actual de la cuenta (no el que se leyó al principio de la petición). */
+const isAccountDisabled = async (connection, userId) => {
+  const [rows] = await connection.query("SELECT ID_ESTADO_USUARIO FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?", [userId]);
+  return rows.length === 0 || DISABLED_STATES.includes(Number(rows[0].ID_ESTADO_USUARIO));
+};
+
+/**
+ * Suma un intento fallido (contraseña o código del login) y bloquea la cuenta al llegar al máximo,
+ * en una sola sentencia. Con muchas peticiones a la vez cada una parte del conteo ya actualizado
+ * (InnoDB bloquea la fila), así que el límite no se puede saltar mandando intentos en paralelo.
+ * Aplica a todos los roles, guardias incluidos. Devuelve { blocked, attemptsLeft }.
+ */
+const registerFailedLogin = async (connection, req, user, detalle) => {
+  const [paramRows] = await connection.query("SELECT VALOR FROM TBL_MS_PARAMETROS WHERE PARAMETRO = ?", ["INTENTOS_FALLIDOS"]);
+  const maxAttempts = parseInt(paramRows[0]?.VALOR, 10) || 3;
+
+  // El estado se calcula antes del incremento y con el valor anterior + 1: el resultado es el mismo
+  // tanto si MySQL evalúa las asignaciones en orden como si usa los valores originales.
+  await connection.query(
+    `UPDATE TBL_MS_USUARIO
+        SET ID_ESTADO_USUARIO = IF(INTENTOS_FALLIDOS + 1 >= ?, 3, ID_ESTADO_USUARIO),
+            INTENTOS_FALLIDOS = INTENTOS_FALLIDOS + 1
+      WHERE ID_USUARIO = ?`,
+    [maxAttempts, user.ID_USUARIO]
+  );
+  const [rows] = await connection.query("SELECT INTENTOS_FALLIDOS, ID_ESTADO_USUARIO FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?", [user.ID_USUARIO]);
+  const fails = Number(rows[0]?.INTENTOS_FALLIDOS) || 0;
+  const blocked = Number(rows[0]?.ID_ESTADO_USUARIO) === 3;
+
+  if (blocked && Number(user.ID_ESTADO_USUARIO) !== 3) {
+    await logUsuario(connection, req, {
+      idUsuario: user.ID_USUARIO,
+      accion: ACCION.BLOQUEO,
+      detalle: `Bloqueo automático: ${maxAttempts} ${detalle}`,
+      responsable: 'Sistema (seguridad)',
+    });
+  }
+  return { blocked, attemptsLeft: Math.max(0, maxAttempts - fails) };
+};
+
+/**
+ * Correo con el código del segundo paso del login: el 2FA de siempre, o la confirmación de un
+ * dispositivo nuevo (al confirmarlo se cierra la sesión del dispositivo anterior).
+ */
+const loginCodeMail = (to, code, reason, device) => {
+  const newDevice = reason === 'new_device';
+  return {
+    from: `"GV-Security Support" <${process.env.EMAIL_USER}>`,
+    to,
+    subject: newDevice
+      ? `${code} es tu código para confirmar un dispositivo nuevo - GV-Security`
+      : `${code} es tu código 2FA - GV-Security`,
+    html: `
+      <div style="font-family: Arial, sans-serif; background-color: #f4f6f8; padding: 30px;">
+        <div style="max-width: 500px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; padding: 30px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-top: 5px solid #0E2041;">
+          <h2 style="color: #0E2041; margin-top: 0; font-size: 24px; text-align: center; font-weight: 800;">GV-Security</h2>
+          <h3 style="color: #333333; font-size: 18px; margin-bottom: 10px;">${newDevice ? 'Inicio de sesión en un dispositivo nuevo' : 'Autenticación en Dos Pasos (2FA)'}</h3>
+          <p style="color: #555555; font-size: 14px; line-height: 1.6;">Hola,</p>
+          <p style="color: #555555; font-size: 14px; line-height: 1.6;">${newDevice
+            ? `Alguien está iniciando sesión en tu cuenta desde un dispositivo que no reconocemos (<strong>${escapeHtml(device)}</strong>). Si eres tú, usa este código. Al confirmarlo se cerrará la sesión en tu dispositivo anterior.`
+            : 'Se ha detectado un intento de inicio de sesión en tu cuenta. Usa el siguiente código de seguridad para confirmar tu acceso:'}</p>
+          ${codeBlockHtml(code)}
+          <p style="color: #888888; font-size: 13px; text-align: center;">⏱️ Este código es válido durante <strong>10 minutos</strong> y es de un solo uso.</p>
+          <hr style="border: none; border-top: 1px solid #eeeeee; margin: 25px 0;" />
+          ${newDevice ? '<p style="color: #555555; font-size: 12px; line-height: 1.6;">Tu cuenta es personal: quien la use puede generar códigos QR de ingreso a tu nombre.</p>' : ''}
+          <p style="color: #e53e3e; font-size: 12px; text-align: center; margin-bottom: 0;">${newDevice
+            ? 'Si no eres tú, no compartas este código con nadie y cambia tu contraseña de inmediato.'
+            : 'Si tú no intentaste iniciar sesión, te recomendamos cambiar tu contraseña de inmediato.'}</p>
+        </div>
+      </div>`
+  };
+};
+
+/**
+ * Aviso al dueño de la cuenta cuando se confirma un dispositivo nuevo: correo y push. El push sale
+ * al token guardado, que todavía es el del dispositivo anterior. Sin IP ni ubicación: solo el tipo
+ * de dispositivo y la hora. No retrasa la respuesta; los fallos solo se registran.
+ */
+const notifyNewDeviceLogin = (user, req) => {
+  try {
+    const device = describeDevice(req.headers['user-agent']);
+    const when = new Date().toLocaleString('es-HN', { timeZone: 'America/Tegucigalpa', dateStyle: 'long', timeStyle: 'short' });
+    sendMailWithTimeout({
+      from: `"GV-Security Support" <${process.env.EMAIL_USER}>`,
+      to: user.EMAIL,
+      subject: 'Nuevo inicio de sesión en tu cuenta de GV-Security',
+      html: `
+        <div style="font-family: Arial, sans-serif; background-color: #f4f6f8; padding: 30px;">
+          <div style="max-width: 500px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; padding: 30px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-top: 5px solid #0E2041;">
+            <h2 style="color: #0E2041; margin-top: 0; font-size: 24px; text-align: center; font-weight: 800;">GV-Security</h2>
+            <h3 style="color: #333333; font-size: 18px; margin-bottom: 10px;">Nuevo inicio de sesión</h3>
+            <p style="color: #555555; font-size: 14px; line-height: 1.6;">Hola ${escapeHtml(user.NOMBRE_USUARIO)},</p>
+            <p style="color: #555555; font-size: 14px; line-height: 1.6;">Se inició sesión en tu cuenta desde un dispositivo nuevo: <strong>${escapeHtml(device)}</strong>, el ${escapeHtml(when)}. Para proteger tu cuenta, cerramos la sesión en el dispositivo anterior.</p>
+            <p style="color: #555555; font-size: 14px; line-height: 1.6;">Si fuiste tú, no tienes que hacer nada.</p>
+            <p style="color: #e53e3e; font-size: 13px; font-weight: bold; line-height: 1.6; margin-bottom: 0;">Si no fuiste tú, cambia tu contraseña de inmediato y avisa a la administración del residencial.</p>
+          </div>
+        </div>`
+    }).catch((mailError) => console.error("Error al enviar el aviso de nuevo inicio de sesión:", mailError.message));
+
+    if (user.FCM_TOKEN) {
+      sendPush(user.FCM_TOKEN, {
+        title: 'Nuevo inicio de sesión',
+        body: `Se inició sesión con tu cuenta en ${device} y se cerró en este dispositivo. Si no fuiste tú, cambia tu contraseña.`,
+        link: '/login',
+      }).catch((pushError) => console.error("Error al enviar el push de nuevo inicio de sesión:", pushError.message));
+    }
+  } catch (err) {
+    console.error("Error al preparar el aviso de nuevo inicio de sesión:", err.message);
+  }
+};
+
 const login = async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ message: "Usuario y contraseña son requeridos" });
@@ -203,72 +387,53 @@ const login = async (req, res) => {
 
     const passwordIsValid = await bcrypt.compare(password, user.CONTRASEÑA);
     if (!passwordIsValid) {
-      // Los guardias (Rol 3) no tienen límite de intentos fallidos configurados en la misma tabla
-      if (user.ID_ROL !== 3) {
-        await connection.query("UPDATE TBL_MS_USUARIO SET INTENTOS_FALLIDOS = INTENTOS_FALLIDOS + 1 WHERE EMAIL = ?", [username]);
-        const [paramRows] = await connection.query("SELECT VALOR FROM TBL_MS_PARAMETROS WHERE PARAMETRO = ?", ["INTENTOS_FALLIDOS"]);
-        const maxLoginAttempts = paramRows.length > 0 ? parseInt(paramRows[0].VALOR, 10) : 3;
-        if (user.INTENTOS_FALLIDOS + 1 >= maxLoginAttempts) {
-          await connection.query("UPDATE TBL_MS_USUARIO SET ID_ESTADO_USUARIO = 3 WHERE EMAIL = ?", [username]);
-          await logUsuario(connection, req, {
-            idUsuario: user.ID_USUARIO,
-            accion: ACCION.BLOQUEO,
-            detalle: `Bloqueo automático: ${maxLoginAttempts} intentos fallidos de contraseña al iniciar sesión`,
-            responsable: 'Sistema (seguridad)',
-          });
-          return res.status(403).json({ message: "Usuario bloqueado por múltiples intentos fallidos" });
-        }
-      }
+      // Límite de intentos para todos los roles (antes los guardias no tenían ninguno)
+      const { blocked } = await registerFailedLogin(connection, req, user, 'intentos fallidos de contraseña al iniciar sesión');
+      if (blocked) return res.status(403).json({ message: "Usuario bloqueado por múltiples intentos fallidos" });
       return res.status(401).json({ message: "Usuario o contraseña incorrecta" });
     }
 
     await connection.query(`UPDATE TBL_MS_USUARIO SET INTENTOS_FALLIDOS = 0, PRIMER_INGRESO = IF(PRIMER_INGRESO IS NULL, NOW(), PRIMER_INGRESO) WHERE EMAIL = ?`, [username]);
-    // Incluir el rol en el JWT para que el frontend pueda usarlo en protección de rutas
-    const token = jwt.sign({ id: user.ID_USUARIO, role: user.ID_ROL }, SECRET_KEY, { expiresIn: '2h' });
+    // Si otros intentos simultáneos bloquearon la cuenta mientras se comprobaba esta contraseña, gana el bloqueo
+    if (await isAccountDisabled(connection, user.ID_USUARIO)) {
+      return res.status(403).json({ message: "Usuario bloqueado" });
+    }
 
-    if (Number(user.CODIGO_2FA) === 1) {
+    // Sesión única con dispositivo de confianza: el primer dispositivo queda registrado; uno distinto
+    // necesita el código del correo (además del 2FA, si está activo). Entrar cierra la sesión anterior.
+    const deviceHash = hashDeviceId(req.body.deviceId);
+    const isNewDevice = !!user.DISPOSITIVO_ID && deviceHash !== user.DISPOSITIVO_ID;
+
+    if (Number(user.CODIGO_2FA) === 1 || isNewDevice) {
+      // Todavía NO se entrega la sesión: solo un token de paso que únicamente sirve en /verify-2fa
+      // (authenticateToken lo rechaza). La sesión llega al validar el código.
+      const verifyReason = isNewDevice ? 'new_device' : '2fa';
+      const token = signPurposeToken('pre2fa', { id: user.ID_USUARIO, dev: deviceHash, reason: verifyReason }, PRE2FA_TOKEN_TTL);
       const { code: verificationCode, encrypted: encryptedCode } = generateVerificationPayload(6, 10);
 
-      await connection.query("UPDATE TBL_MS_USUARIO SET CODIGO_VERIFICACION = ? WHERE EMAIL = ?", [encryptedCode, username]);
+      await connection.query("UPDATE TBL_MS_USUARIO SET CODIGO_VERIFICACION = ? WHERE ID_USUARIO = ?", [encryptedCode, user.ID_USUARIO]);
 
-      const mailOptions = {
-        from: `"GV-Security Support" <${process.env.EMAIL_USER}>`,
-        to: username,
-        subject: `${verificationCode} es tu código 2FA - GV-Security`,
-        html: `
-          <div style="font-family: Arial, sans-serif; background-color: #f4f6f8; padding: 30px;">
-            <div style="max-width: 500px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; padding: 30px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-top: 5px solid #0E2041;">
-              <h2 style="color: #0E2041; margin-top: 0; font-size: 24px; text-align: center; font-weight: 800;">GV-Security</h2>
-              <h3 style="color: #333333; font-size: 18px; margin-bottom: 10px;">Autenticación en Dos Pasos (2FA)</h3>
-              <p style="color: #555555; font-size: 14px; line-height: 1.6;">Hola,</p>
-              <p style="color: #555555; font-size: 14px; line-height: 1.6;">Se ha detectado un intento de inicio de sesión en tu cuenta. Usa el siguiente código de seguridad para confirmar tu acceso:</p>
-              ${codeBlockHtml(verificationCode)}
-              <p style="color: #888888; font-size: 13px; text-align: center;">⏱️ Este código es válido durante <strong>10 minutos</strong> y es de un solo uso.</p>
-              <hr style="border: none; border-top: 1px solid #eeeeee; margin: 25px 0;" />
-              <p style="color: #e53e3e; font-size: 12px; text-align: center; margin-bottom: 0;">Si tú no intentaste iniciar sesión, te recomendamos cambiar tu contraseña de inmediato.</p>
-            </div>
-          </div>
-        `
-      };
-
+      const pending = { token, id_usuario: user.ID_USUARIO, role: user.ID_ROL, require2FA: true, verifyReason };
       try {
-        await sendMailWithTimeout(mailOptions);
-        return res.status(200).json({ token, id_usuario: user.ID_USUARIO, role: user.ID_ROL, require2FA: true, message: "Código 2FA enviado" });
-      } catch (mailError) {
-        console.error("Error al enviar email 2FA:", mailError.message);
-        // No bloqueamos el login: devolvemos el token y avisamos al cliente
+        await sendMailWithTimeout(loginCodeMail(user.EMAIL, verificationCode, verifyReason, describeDevice(req.headers['user-agent'])));
         return res.status(200).json({
-          token,
-          id_usuario: user.ID_USUARIO,
-          role: user.ID_ROL,
-          require2FA: true,
+          ...pending,
+          message: isNewDevice ? "Confirma este dispositivo con el código enviado a tu correo" : "Código 2FA enviado",
+        });
+      } catch (mailError) {
+        console.error("Error al enviar el código de inicio de sesión:", mailError.message);
+        // No bloqueamos el login: devolvemos el token de paso y avisamos al cliente
+        return res.status(200).json({
+          ...pending,
           emailError: true,
           message: "Código generado pero no se pudo enviar el correo. Contacte al administrador."
         });
       }
-    } else {
-      return res.status(200).json({ token, id_usuario: user.ID_USUARIO, role: user.ID_ROL, require2FA: false, message: "Login exitoso" });
     }
+
+    // Dispositivo de confianza (o el primero que se registra): la sesión empieza aquí y cierra cualquier otra
+    const token = await startSession(connection, user, deviceHash);
+    return res.status(200).json({ token, id_usuario: user.ID_USUARIO, role: user.ID_ROL, require2FA: false, message: "Login exitoso" });
   } catch (err) {
     console.error("Error en login:", err);
     res.status(500).json({ message: "Error interno del servidor" });
@@ -278,56 +443,56 @@ const login = async (req, res) => {
 };
 
 const verify2FA = async (req, res) => {
-  const { id_usuario, codigo } = req.body;
-  if (!id_usuario || !codigo) return res.status(400).json({ message: "Datos incompletos" });
+  const { codigo } = req.body;
+  if (!codigo) return res.status(400).json({ message: "Datos incompletos" });
+
+  // El código solo vale junto con el token de paso que entregó /login al validar la contraseña;
+  // el usuario sale de ese token, no del body (así nadie prueba códigos ni bloquea cuentas ajenas).
+  const preAuth = verifyPurposeToken('pre2fa', bearerToken(req) || req.body.token);
+  if (!preAuth || (req.body.id_usuario && String(req.body.id_usuario) !== String(preAuth.id))) {
+    return res.status(401).json({ restartLogin: true, message: "Tu verificación expiró. Inicia sesión de nuevo." });
+  }
+  const id_usuario = preAuth.id;
 
   let connection;
   try {
     connection = await mysqlPool.getConnection();
-    const [rows] = await connection.query("SELECT CODIGO_VERIFICACION, ID_ESTADO_USUARIO, INTENTOS_FALLIDOS, EMAIL, ID_ROL FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?", [id_usuario]);
+    const [rows] = await connection.query("SELECT CODIGO_VERIFICACION, ID_ESTADO_USUARIO, INTENTOS_FALLIDOS, EMAIL, ID_ROL, NOMBRE_USUARIO, FCM_TOKEN FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?", [id_usuario]);
     if (rows.length === 0) return res.status(401).json({ message: "Usuario no encontrado" });
 
     const user = rows[0];
     if (user.ID_ESTADO_USUARIO === 3) return res.status(403).json({ message: "Cuenta bloqueada" });
 
-    const validation = validateVerificationCode(codigo, user.CODIGO_VERIFICACION);
+    const validation = validateVerificationCode(String(codigo), user.CODIGO_VERIFICACION);
 
     if (validation.expired) {
-      return res.status(400).json({ 
-        success: false, 
-        expired: true, 
-        message: "El código 2FA ha expirado. Por favor solicita uno nuevo con el botón Reenviar." 
+      return res.status(400).json({
+        success: false,
+        expired: true,
+        message: "El código 2FA ha expirado. Por favor solicita uno nuevo con el botón Reenviar."
       });
     }
 
     if (!validation.valid) {
-      // Incrementar intentos fallidos
-      await connection.query("UPDATE TBL_MS_USUARIO SET INTENTOS_FALLIDOS = INTENTOS_FALLIDOS + 1 WHERE ID_USUARIO = ?", [id_usuario]);
-      
-      const [paramRows] = await connection.query("SELECT VALOR FROM TBL_MS_PARAMETROS WHERE PARAMETRO = ?", ["INTENTOS_FALLIDOS"]);
-      const maxLoginAttempts = paramRows.length > 0 ? parseInt(paramRows[0].VALOR, 10) : 3;
+      const { blocked, attemptsLeft } = await registerFailedLogin(connection, req, { ...user, ID_USUARIO: id_usuario }, 'intentos fallidos del código de verificación');
+      if (blocked) return res.status(403).json({ message: "Usuario bloqueado por múltiples intentos fallidos" });
 
-      if (user.INTENTOS_FALLIDOS + 1 >= maxLoginAttempts) {
-        await connection.query("UPDATE TBL_MS_USUARIO SET ID_ESTADO_USUARIO = 3 WHERE ID_USUARIO = ?", [id_usuario]);
-        await logUsuario(connection, req, {
-          idUsuario: id_usuario,
-          accion: ACCION.BLOQUEO,
-          detalle: `Bloqueo automático: ${maxLoginAttempts} intentos fallidos del código 2FA`,
-          responsable: 'Sistema (seguridad)',
-        });
-        return res.status(403).json({ message: "Usuario bloqueado por múltiples intentos fallidos" });
-      }
-
-      return res.status(401).json({ 
+      return res.status(401).json({
         message: "Código incorrecto",
-        attemptsLeft: maxLoginAttempts - (user.INTENTOS_FALLIDOS + 1)
+        attemptsLeft
       });
     }
 
     // Éxito: Resetear intentos y limpiar código para que no pueda ser reutilizado
     await connection.query("UPDATE TBL_MS_USUARIO SET CODIGO_VERIFICACION = NULL, INTENTOS_FALLIDOS = 0, PRIMER_INGRESO_COMPLETADO = 1 WHERE ID_USUARIO = ?", [id_usuario]);
-    
-    const token = jwt.sign({ id: id_usuario, role: user.ID_ROL }, SECRET_KEY, { expiresIn: '2h' }); 
+    // Si intentos simultáneos bloquearon la cuenta mientras se validaba este código, gana el bloqueo
+    if (await isAccountDisabled(connection, id_usuario)) {
+      return res.status(403).json({ message: "Cuenta bloqueada" });
+    }
+
+    // Sesión única: la sesión nueva cierra la anterior y este dispositivo queda como el de confianza
+    const token = await startSession(connection, { ID_USUARIO: id_usuario, ID_ROL: user.ID_ROL }, preAuth.dev);
+    if (preAuth.reason === 'new_device') notifyNewDeviceLogin(user, req);
     
     res.status(200).json({ 
       success: true, 
@@ -697,6 +862,19 @@ const resendVerificationCode = async (req, res) => {
     }
 
     const is2FA = type === '2fa' || (req.path && req.path.includes('2fa'));
+
+    // El reenvío del segundo paso del login solo vale con el token de paso que entregó /login
+    let preAuth = null;
+    if (is2FA) {
+      preAuth = verifyPurposeToken('pre2fa', bearerToken(req));
+      if (!preAuth || String(preAuth.id) !== String(user.ID_USUARIO)) {
+        return res.status(401).json({ restartLogin: true, message: "Tu verificación expiró. Inicia sesión de nuevo." });
+      }
+    }
+
+    const wait = consumeRateLimit([{ key: `resend-code:user:${user.ID_USUARIO}`, max: 5, windowMs: 15 * MINUTE_MS }]);
+    if (wait) return tooManyRequests(res, wait);
+
     const { code: newCode, encrypted: encryptedCode } = generateVerificationPayload(6, 10);
 
     await connection.query(
@@ -704,11 +882,16 @@ const resendVerificationCode = async (req, res) => {
       [encryptedCode, user.ID_USUARIO]
     );
 
-    const subject = is2FA ? `${newCode} es tu nuevo código 2FA - GV-Security` : `${newCode} es tu nuevo código de verificación - GV-Security`;
-    const title = is2FA ? "Autenticación en Dos Pasos (2FA)" : "Verifica tu correo electrónico";
-    const desc = is2FA 
-      ? "Tu nuevo código de seguridad para acceder a tu cuenta es:" 
-      : `Hola <strong>${user.NOMBRE_USUARIO || 'Usuario'}</strong>,<br/>Usa el siguiente nuevo código para completar la verificación de tu cuenta:`;
+    const newDevice = preAuth?.reason === 'new_device';
+    const subject = newDevice
+      ? `${newCode} es tu nuevo código para confirmar un dispositivo nuevo - GV-Security`
+      : is2FA ? `${newCode} es tu nuevo código 2FA - GV-Security` : `${newCode} es tu nuevo código de verificación - GV-Security`;
+    const title = newDevice ? "Inicio de sesión en un dispositivo nuevo" : is2FA ? "Autenticación en Dos Pasos (2FA)" : "Verifica tu correo electrónico";
+    const desc = newDevice
+      ? "Tu nuevo código para confirmar el inicio de sesión en un dispositivo nuevo es (al confirmarlo se cerrará la sesión en tu dispositivo anterior):"
+      : is2FA
+        ? "Tu nuevo código de seguridad para acceder a tu cuenta es:"
+        : `Hola <strong>${escapeHtml(user.NOMBRE_USUARIO || 'Usuario')}</strong>,<br/>Usa el siguiente nuevo código para completar la verificación de tu cuenta:`;
 
     const mailOptions = {
       from: `"GV-Security Support" <${process.env.EMAIL_USER}>`,
@@ -732,8 +915,8 @@ const resendVerificationCode = async (req, res) => {
     try {
       await sendMailWithTimeout(mailOptions);
     } catch (mailErr) {
+      // Nunca se escribe el código en los registros: quien los lea podría usarlo para entrar
       console.warn("⚠️ Error reenviando correo (SMTP):", mailErr.message);
-      console.log(`🔑 CÓDIGO REENVIADO PARA ${user.EMAIL}: ${newCode}`);
     }
 
     return res.status(200).json({
@@ -749,19 +932,9 @@ const resendVerificationCode = async (req, res) => {
   }
 };
 
+// La ruta exige sesión (authenticateToken): el usuario sale del token, nunca de la URL ni del body.
 const get2FAStatus = async (req, res) => {
-  let userId = null;
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith("Bearer ")) {
-    try {
-      const decoded = jwt.verify(authHeader.split(" ")[1], SECRET_KEY);
-      userId = decoded.id;
-    } catch (e) {}
-  }
-  if (!userId) {
-    userId = req.query.id_usuario || req.query.userId || req.params.usuarioId;
-  }
-  if (!userId) return res.status(401).json({ message: "Token o ID de usuario no proporcionado" });
+  const userId = req.user.id;
 
   let connection;
   try {
@@ -780,19 +953,9 @@ const get2FAStatus = async (req, res) => {
   }
 };
 
+// Igual que get2FAStatus: solo el dueño de la sesión cambia su propio 2FA.
 const set2FAStatus = async (req, res) => {
-  let userId = null;
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith("Bearer ")) {
-    try {
-      const decoded = jwt.verify(authHeader.split(" ")[1], SECRET_KEY);
-      userId = decoded.id;
-    } catch (e) {}
-  }
-  if (!userId) {
-    userId = req.body.id_usuario || req.body.userId;
-  }
-  if (!userId) return res.status(401).json({ message: "Token o ID de usuario no proporcionado" });
+  const userId = req.user.id;
 
   const { enabled } = req.body;
   const enabledNum = (enabled === 1 || enabled === true || enabled === '1') ? 1 : 0;
@@ -817,6 +980,7 @@ const set2FAStatus = async (req, res) => {
 
 const getUserProfile = async (req, res) => {
   const { usuarioId } = req.params;
+  if (!canAccessUser(req, usuarioId)) return denyAccess(res);
   let connection;
   try {
     connection = await mysqlPool.getConnection();
@@ -863,6 +1027,7 @@ const getUserProfile = async (req, res) => {
 
 const getFamilyMembers = async (req, res) => {
   const { usuarioId } = req.params;
+  if (!canAccessUser(req, usuarioId)) return denyAccess(res);
   let connection;
   try {
     connection = await mysqlPool.getConnection();
@@ -898,6 +1063,7 @@ const getFamilyMembers = async (req, res) => {
 // Get detailed info about user's condominium
 const getCondominiumDetails = async (req, res) => {
   const { usuarioId } = req.params;
+  if (!canAccessUser(req, usuarioId)) return denyAccess(res);
   try {
     const connection = await mysqlPool.getConnection();
     const query = `
@@ -926,6 +1092,7 @@ const getCondominiumDetails = async (req, res) => {
 // Get pending or new users in the same condominium
 const getPendingUsers = async (req, res) => {
   const { usuarioId } = req.params;
+  if (!canAccessUser(req, usuarioId)) return denyAccess(res);
   try {
     const connection = await mysqlPool.getConnection();
     const query = `
@@ -959,6 +1126,10 @@ const approveUser = async (req, res) => {
   let connection;
   try {
     connection = await mysqlPool.getConnection();
+
+    const denied = await checkRequestPermission(connection, req, targetUsuarioId);
+    if (denied) return res.status(denied.status).json({ success: false, error: denied.message, message: denied.message });
+
     await connection.beginTransaction();
 
     // Obtener condominio del usuario a aprobar
@@ -1021,8 +1192,14 @@ const approveUser = async (req, res) => {
 // Reject and delete user request
 const rejectUser = async (req, res) => {
   const { targetUsuarioId } = req.params;
+  let connection;
   try {
-    const connection = await mysqlPool.getConnection();
+    connection = await mysqlPool.getConnection();
+
+    // Rechazar BORRA al usuario: solo solicitudes pendientes y solo quien tiene permiso
+    const denied = await checkRequestPermission(connection, req, targetUsuarioId);
+    if (denied) return res.status(denied.status).json({ message: denied.message });
+
     await connection.beginTransaction();
 
     // Fotografía antes de borrar (los logs no tienen FK, sobreviven al DELETE)
@@ -1035,68 +1212,118 @@ const rejectUser = async (req, res) => {
     await connection.query('DELETE FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?', [targetUsuarioId]);
 
     await connection.commit();
-    connection.release();
     res.json({ message: 'Solicitud rechazada y eliminada' });
   } catch (error) {
+    if (connection) await connection.rollback();
     console.error('Error in rejectUser:', error);
     res.status(500).json({ message: 'Error al rechazar solicitud' });
+  } finally {
+    if (connection) connection.release();
   }
 };
 
-// Password Recovery Functions
+// ─── Recuperación de contraseña ───
+// Flujo: forgot-password (código al correo) → verify-reset-code (devuelve resetToken) → reset-password.
+
 const enviarCodigoRecuperacion = async (req, res) => {
-  const { email } = req.body;
+  const email = normalizeEmail(req.body.email);
   if (!email) return res.status(400).json({ message: "El correo es requerido" });
+
+  // Los límites se aplican antes de buscar la cuenta, así un 429 no revela si el correo existe
+  const wait = consumeRateLimit([
+    { key: `reset-request:ip:${clientInfo(req).ip}`, max: 10, windowMs: 15 * MINUTE_MS },
+    { key: `reset-request:mail-1m:${email}`, max: 1, windowMs: MINUTE_MS },   // un código por minuto
+    { key: `reset-request:mail-1h:${email}`, max: 5, windowMs: 60 * MINUTE_MS }, // y cinco por hora
+  ]);
+  if (wait) return tooManyRequests(res, wait);
 
   let connection;
   try {
     connection = await mysqlPool.getConnection();
-    const [rows] = await connection.query("SELECT ID_USUARIO FROM TBL_MS_USUARIO WHERE EMAIL = ?", [email]);
-    if (rows.length === 0) return res.status(404).json({ message: "Usuario no encontrado" });
+    const [rows] = await connection.query(
+      "SELECT ID_USUARIO, NOMBRE_USUARIO, EMAIL, ID_ESTADO_USUARIO FROM TBL_MS_USUARIO WHERE EMAIL = ?",
+      [email]
+    );
+    const user = rows[0];
 
-    const verificationCode = crypto.randomBytes(3).toString("hex").toUpperCase();
-    const encryptedCode = encrypt(verificationCode);
+    // Misma respuesta exista o no la cuenta: no se puede averiguar qué correos están registrados
+    if (!user || !RECOVERY_ALLOWED_STATES.includes(Number(user.ID_ESTADO_USUARIO))) {
+      return res.json({ success: true, message: RECOVERY_SENT_MESSAGE });
+    }
 
-    await connection.query("UPDATE TBL_MS_USUARIO SET CODIGO_VERIFICACION = ? WHERE EMAIL = ?", [encryptedCode, email]);
+    // Código con vencimiento y de un solo uso; reemplaza a cualquier código anterior
+    const { code: verificationCode, encrypted: encryptedCode } = generateVerificationPayload(6, RECOVERY_CODE_MINUTES);
+    await connection.query("UPDATE TBL_MS_USUARIO SET CODIGO_VERIFICACION = ? WHERE ID_USUARIO = ?", [encryptedCode, user.ID_USUARIO]);
 
-    const mailOptions = {
+    res.json({ success: true, message: RECOVERY_SENT_MESSAGE });
+
+    // El correo sale después de responder: el tiempo de respuesta tampoco delata si la cuenta existe
+    sendMailWithTimeout({
       from: `"GV-Security Support" <${process.env.EMAIL_USER}>`,
-      to: email,
+      to: user.EMAIL,
       subject: `${verificationCode} es tu código de recuperación - GV-Security`,
-      html: `<div style="font-family: sans-serif; padding: 20px; border: 1px solid #ddd;">
-          <h2>Recuperación de Contraseña</h2>
-          <p>Has solicitado restablecer tu contraseña. Tu código de verificación es:</p>
-          ${codeBlockHtml(verificationCode)}
-          <p>Si no solicitaste este cambio, puedes ignorar este correo.</p>
+      html: `
+        <div style="font-family: Arial, sans-serif; background-color: #f4f6f8; padding: 30px;">
+          <div style="max-width: 500px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; padding: 30px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-top: 5px solid #0E2041;">
+            <h2 style="color: #0E2041; margin-top: 0; font-size: 24px; text-align: center; font-weight: 800;">GV-Security</h2>
+            <h3 style="color: #333333; font-size: 18px; margin-bottom: 10px;">Restablecer contraseña</h3>
+            <p style="color: #555555; font-size: 14px; line-height: 1.6;">Hola ${escapeHtml(user.NOMBRE_USUARIO)},</p>
+            <p style="color: #555555; font-size: 14px; line-height: 1.6;">Recibimos una solicitud para restablecer la contraseña de tu cuenta. Usa este código para continuar:</p>
+            ${codeBlockHtml(verificationCode)}
+            <p style="color: #888888; font-size: 13px; text-align: center;">⏱️ Vence en <strong>${RECOVERY_CODE_MINUTES} minutos</strong> y solo se puede usar una vez.</p>
+            <hr style="border: none; border-top: 1px solid #eeeeee; margin: 25px 0;" />
+            <p style="color: #555555; font-size: 12px; line-height: 1.6;">Nunca compartas este código: el personal de GV-Security no te lo pedirá por teléfono ni por mensaje.</p>
+            <p style="color: #e53e3e; font-size: 12px; margin-bottom: 0;">Si no lo solicitaste, ignora este correo: tu contraseña no cambiará.</p>
+          </div>
         </div>`
-    };
-
-    await sendMailWithTimeout(mailOptions);
-    res.json({ success: true, message: "Código enviado a su correo", id_usuario: rows[0].ID_USUARIO });
+    }).catch((mailError) => console.error("Error al enviar el código de recuperación:", mailError.message));
   } catch (error) {
     console.error("Error in enviarCodigoRecuperacion:", error);
-    res.status(500).json({ message: "Error al enviar el código" });
+    if (!res.headersSent) res.status(500).json({ message: "No se pudo procesar la solicitud. Intenta de nuevo." });
   } finally {
     if (connection) connection.release();
   }
 };
 
 const verificarCodigoRecuperacion = async (req, res) => {
-  const { id_usuario, codigo } = req.body;
-  if (!id_usuario || !codigo) return res.status(400).json({ message: "Datos incompletos" });
+  const email = normalizeEmail(req.body.email);
+  const { codigo } = req.body;
+  if (!email || !codigo) return res.status(400).json({ message: "Datos incompletos" });
+
+  const wait = consumeRateLimit([{ key: `reset-verify:ip:${clientInfo(req).ip}`, max: 20, windowMs: 15 * MINUTE_MS }]);
+  if (wait) return tooManyRequests(res, wait);
 
   let connection;
   try {
     connection = await mysqlPool.getConnection();
-    const [rows] = await connection.query("SELECT CODIGO_VERIFICACION FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?", [id_usuario]);
-    if (rows.length === 0) return res.status(404).json({ message: "Usuario no encontrado" });
+    const [rows] = await connection.query(
+      "SELECT ID_USUARIO, ID_ESTADO_USUARIO, CODIGO_VERIFICACION, CONTRASEÑA FROM TBL_MS_USUARIO WHERE EMAIL = ?",
+      [email]
+    );
+    const user = rows[0];
+    const stored = user && RECOVERY_ALLOWED_STATES.includes(Number(user.ID_ESTADO_USUARIO)) ? user.CODIGO_VERIFICACION : null;
 
-    const encryptedInput = encrypt(codigo.toUpperCase());
-    if (rows[0].CODIGO_VERIFICACION !== encryptedInput) {
-      return res.status(401).json({ message: "Código incorrecto" });
+    // Sin cuenta, sin código activo, vencido o del formato viejo (que no vencía): misma respuesta
+    const validation = stored ? validateVerificationCode(String(codigo), stored) : null;
+    if (!validation || validation.expired || validation.legacy) {
+      return res.status(400).json({ expired: true, message: RECOVERY_INVALID_CODE_MESSAGE });
+    }
+    if (!validation.valid) {
+      const attemptsLeft = await registerFailedCodeAttempt(connection, user.ID_USUARIO, stored);
+      return res.status(401).json({
+        message: attemptsLeft > 0
+          ? `Código incorrecto. Te queda${attemptsLeft === 1 ? '' : 'n'} ${attemptsLeft} intento${attemptsLeft === 1 ? '' : 's'}.`
+          : "Demasiados intentos con este código. Solicita uno nuevo.",
+        attemptsLeft,
+      });
     }
 
-    res.json({ success: true, message: "Código verificado correctamente" });
+    // El código se consume aquí; para cambiar la contraseña se usa el token de restablecimiento
+    // (vence pronto y deja de servir en cuanto la contraseña cambia).
+    await connection.query("UPDATE TBL_MS_USUARIO SET CODIGO_VERIFICACION = NULL WHERE ID_USUARIO = ?", [user.ID_USUARIO]);
+    const resetToken = signPurposeToken('pwdReset', { id: user.ID_USUARIO, ph: passwordFingerprint(user.CONTRASEÑA) }, RESET_TOKEN_TTL);
+
+    res.json({ success: true, message: "Código verificado correctamente", resetToken });
   } catch (error) {
     console.error("Error in verificarCodigoRecuperacion:", error);
     res.status(500).json({ message: "Error al verificar el código" });
@@ -1151,21 +1378,93 @@ const validatePasswordSecurity = (password, userDetails = {}) => {
   return null;
 };
 
+/**
+ * Aviso de seguridad tras restablecer ('reset') o cambiar ('change') la contraseña: correo con fecha,
+ * IP y navegador, y push al teléfono si tiene notificaciones. No retrasa la respuesta; los fallos solo se registran.
+ */
+const notifyPasswordChanged = (user, req, reason = 'reset') => {
+  // Se llama después de responder: nada de aquí puede terminar en un segundo res.json
+  try {
+  const how = reason === 'change'
+    ? 'La contraseña de tu cuenta se cambió desde la app, con tu sesión iniciada.'
+    : 'La contraseña de tu cuenta se restableció con un código enviado a este correo.';
+  const risk = reason === 'change' ? 'alguien podría haber entrado a tu cuenta' : 'alguien podría tener acceso a tu correo';
+  const { ip, navegador } = clientInfo(req);
+  const when = new Date().toLocaleString('es-HN', { timeZone: 'America/Tegucigalpa', dateStyle: 'long', timeStyle: 'short' });
+  const row = (label, value) => `
+    <tr>
+      <td style="padding: 6px 10px; color: #888888; white-space: nowrap; vertical-align: top;">${label}</td>
+      <td style="padding: 6px 10px; color: #333333;">${escapeHtml(value)}</td>
+    </tr>`;
+
+  sendMailWithTimeout({
+    from: `"GV-Security Support" <${process.env.EMAIL_USER}>`,
+    to: user.EMAIL,
+    subject: 'Tu contraseña de GV-Security fue cambiada',
+    html: `
+      <div style="font-family: Arial, sans-serif; background-color: #f4f6f8; padding: 30px;">
+        <div style="max-width: 500px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; padding: 30px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-top: 5px solid #0E2041;">
+          <h2 style="color: #0E2041; margin-top: 0; font-size: 24px; text-align: center; font-weight: 800;">GV-Security</h2>
+          <h3 style="color: #333333; font-size: 18px; margin-bottom: 10px;">Tu contraseña fue cambiada</h3>
+          <p style="color: #555555; font-size: 14px; line-height: 1.6;">Hola ${escapeHtml(user.NOMBRE_USUARIO)},</p>
+          <p style="color: #555555; font-size: 14px; line-height: 1.6;">${how}</p>
+          <table style="width: 100%; font-size: 13px; background-color: #f8f9fb; border-radius: 8px; margin: 20px 0; border-collapse: collapse;">
+            ${row('Fecha', when)}
+            ${row('Dirección IP', ip)}
+            ${row('Navegador', String(navegador).slice(0, 150))}
+          </table>
+          <p style="color: #e53e3e; font-size: 13px; font-weight: bold; line-height: 1.6; margin-bottom: 0;">Si no fuiste tú, contacta de inmediato a la administración del residencial: ${risk}.</p>
+        </div>
+      </div>`
+  }).catch((mailError) => console.error("Error al enviar el aviso de cambio de contraseña:", mailError.message));
+
+  if (user.FCM_TOKEN) {
+    sendPush(user.FCM_TOKEN, {
+      title: 'Contraseña actualizada',
+      body: 'Se cambió la contraseña de tu cuenta. Si no fuiste tú, contacta a la administración de inmediato.',
+      link: '/login',
+    }).catch((pushError) => console.error("Error al enviar el push de cambio de contraseña:", pushError.message));
+  }
+  } catch (err) {
+    console.error("Error al preparar el aviso de cambio de contraseña:", err.message);
+  }
+};
+
 const actualizarContrasena = async (req, res) => {
-  const { id_usuario, nuevaContrasena } = req.body;
-  if (!id_usuario || !nuevaContrasena) return res.status(400).json({ success: false, message: "Datos incompletos" });
+  const { nuevaContrasena } = req.body;
+
+  const wait = consumeRateLimit([{ key: `reset-save:ip:${clientInfo(req).ip}`, max: 15, windowMs: 15 * MINUTE_MS }]);
+  if (wait) return tooManyRequests(res, wait);
+
+  // Solo con el token que entrega verify-reset-code tras validar el código del correo;
+  // el usuario sale de ese token (antes bastaba con enviar cualquier id_usuario).
+  const reset = verifyPurposeToken('pwdReset', req.body.resetToken || bearerToken(req));
+  if (!reset || (req.body.id_usuario && String(req.body.id_usuario) !== String(reset.id))) {
+    return res.status(401).json({ success: false, message: "Tu verificación expiró o no es válida. Solicita un nuevo código." });
+  }
+  if (!nuevaContrasena) return res.status(400).json({ success: false, message: "Datos incompletos" });
+  const id_usuario = reset.id;
 
   let connection;
   try {
     connection = await mysqlPool.getConnection();
 
     const [rows] = await connection.query(
-      "SELECT ID_USUARIO, NOMBRE_USUARIO, EMAIL, CONTRASEÑA FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?", 
+      "SELECT ID_USUARIO, NOMBRE_USUARIO, EMAIL, CONTRASEÑA, ID_ESTADO_USUARIO, FCM_TOKEN FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?",
       [id_usuario]
     );
     if (rows.length === 0) return res.status(404).json({ success: false, message: "Usuario no encontrado" });
 
     const user = rows[0];
+
+    // Un solo uso: si la contraseña ya cambió desde que se validó el código, el token no sirve
+    if (reset.ph !== passwordFingerprint(user.CONTRASEÑA)) {
+      return res.status(401).json({ success: false, message: "Esta verificación ya se usó. Solicita un nuevo código." });
+    }
+    // La cuenta pudo darse de baja mientras tanto
+    if (!RECOVERY_ALLOWED_STATES.includes(Number(user.ID_ESTADO_USUARIO))) {
+      return res.status(403).json({ success: false, message: "Tu cuenta no está activa. Contacta a la administración." });
+    }
 
     const securityError = validatePasswordSecurity(nuevaContrasena, {
       NOMBRE_USUARIO: user.NOMBRE_USUARIO,
@@ -1190,11 +1489,19 @@ const actualizarContrasena = async (req, res) => {
     for (const hist of historyRows) {
       const isReused = await bcrypt.compare(nuevaContrasena, hist.CONTRASEÑA);
       if (isReused) {
-        return res.status(400).json({ 
-          success: false, 
-          message: "No puedes reutilizar una contraseña usada anteriormente." 
+        return res.status(400).json({
+          success: false,
+          message: "No puedes reutilizar una contraseña usada anteriormente."
         });
       }
+    }
+
+    // Contraseñas expuestas en filtraciones públicas (si el servicio no responde, no se bloquea)
+    if (await isPasswordBreached(nuevaContrasena)) {
+      return res.status(400).json({
+        success: false,
+        message: "Esta contraseña aparece en filtraciones de datos públicas y es fácil de adivinar. Elige otra."
+      });
     }
 
     await connection.beginTransaction();
@@ -1208,8 +1515,9 @@ const actualizarContrasena = async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(nuevaContrasena, 10);
     
+    // SESION_ID = NULL: la sesión abierta en cualquier dispositivo se cierra con el cambio
     await connection.query(
-      "UPDATE TBL_MS_USUARIO SET CONTRASEÑA = ?, CODIGO_VERIFICACION = NULL, INTENTOS_FALLIDOS = 0 WHERE ID_USUARIO = ?",
+      "UPDATE TBL_MS_USUARIO SET CONTRASEÑA = ?, CODIGO_VERIFICACION = NULL, INTENTOS_FALLIDOS = 0, SESION_ID = NULL WHERE ID_USUARIO = ?",
       [hashedPassword, id_usuario]
     );
 
@@ -1221,7 +1529,15 @@ const actualizarContrasena = async (req, res) => {
     });
 
     await connection.commit();
-    res.json({ success: true, message: "Contraseña actualizada exitosamente" });
+    forgetSession(id_usuario);
+    res.json({
+      success: true,
+      message: "Contraseña actualizada exitosamente",
+      // Un bloqueo de la cuenta se mantiene: lo levanta la administración
+      accountBlocked: Number(user.ID_ESTADO_USUARIO) === 3,
+      sessionsClosed: true,
+    });
+    notifyPasswordChanged(user, req);
   } catch (error) {
     if (connection) await connection.rollback();
     console.error("Error in actualizarContrasena:", error);
@@ -1231,12 +1547,18 @@ const actualizarContrasena = async (req, res) => {
   }
 };
 
+// La ruta exige sesión: el usuario sale del token. Antes bastaba un id_usuario en el body y se
+// podían probar contraseñas sin límite, saltándose el bloqueo del login.
 const changePassword = async (req, res) => {
-  const { id_usuario, currentPassword, newPassword } = req.body;
+  const id_usuario = req.user.id;
+  const { currentPassword, newPassword } = req.body;
 
-  if (!id_usuario || !currentPassword || !newPassword) {
+  if (!currentPassword || !newPassword) {
     return res.status(400).json({ success: false, message: "Todos los campos son requeridos." });
   }
+
+  const wait = consumeRateLimit([{ key: `change-pwd:user:${id_usuario}`, max: 10, windowMs: 15 * MINUTE_MS }]);
+  if (wait) return tooManyRequests(res, wait);
 
   if (currentPassword === newPassword) {
     return res.status(400).json({ 
@@ -1251,7 +1573,7 @@ const changePassword = async (req, res) => {
 
     // 1. Obtener datos del usuario
     const [rows] = await connection.query(
-      "SELECT ID_USUARIO, NOMBRE_USUARIO, EMAIL, CONTRASEÑA, ID_ESTADO_USUARIO FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?", 
+      "SELECT ID_USUARIO, NOMBRE_USUARIO, EMAIL, CONTRASEÑA, ID_ESTADO_USUARIO, FCM_TOKEN FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?",
       [id_usuario]
     );
 
@@ -1300,9 +1622,17 @@ const changePassword = async (req, res) => {
       if (isReused) {
         return res.status(400).json({ 
           success: false, 
-          message: "No puedes reutilizar una contraseña usada anteriormente. Por motivos de seguridad, elige una contraseña diferente." 
+          message: "No puedes reutilizar una contraseña usada anteriormente. Por motivos de seguridad, elige una contraseña diferente."
         });
       }
+    }
+
+    // Contraseñas expuestas en filtraciones públicas (si el servicio no responde, no se bloquea)
+    if (await isPasswordBreached(newPassword)) {
+      return res.status(400).json({
+        success: false,
+        message: "Esta contraseña aparece en filtraciones de datos públicas y es fácil de adivinar. Elige otra."
+      });
     }
 
     // 6. Iniciar transacción para actualizar y registrar historial
@@ -1368,10 +1698,12 @@ const changePassword = async (req, res) => {
 
     await connection.commit();
 
-    return res.status(200).json({ 
-      success: true, 
-      message: "¡Contraseña actualizada exitosamente!" 
+    res.status(200).json({
+      success: true,
+      message: "¡Contraseña actualizada exitosamente!"
     });
+    notifyPasswordChanged(user, req, 'change');
+    return;
 
   } catch (error) {
     if (connection) await connection.rollback();
@@ -1483,9 +1815,25 @@ const sendTestPush = async (req, res) => {
   }
 };
 
+/** Cierra la sesión actual en el servidor: el token deja de servir aunque alguien lo haya copiado. */
+const logout = async (req, res) => {
+  try {
+    await endSession(req.user.id, req.user.sid);
+    res.json({ success: true, message: "Sesión cerrada" });
+  } catch (error) {
+    console.error("Error al cerrar sesión:", error);
+    res.status(500).json({ success: false, message: "No se pudo cerrar la sesión" });
+  }
+};
+
+/** Confirma que la sesión sigue vigente (authenticateToken ya lo validó); la app lo consulta al volver a primer plano. */
+const sessionStatus = (req, res) => res.json({ success: true });
+
 module.exports = {
-  register, 
+  register,
   login,
+  logout,
+  sessionStatus,
   verify2FA,
   verifyRegistration,
   resendVerificationCode,

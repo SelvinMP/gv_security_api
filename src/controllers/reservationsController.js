@@ -1,5 +1,6 @@
 const { mysqlPool } = require('../config/db');
 const { notifyAdminsNewReservation } = require('../utils/reservationNotify');
+const { canAccessUser, denyAccess } = require('../utils/access');
 
 /**
  * Obtiene todas las instalaciones disponibles.
@@ -66,16 +67,18 @@ const insertReservation = async (connection, { idUsuario, idInstalacion, tipoEve
 };
 
 const createReservation = async (req, res) => {
-  const { idUsuario, idInstalacion, fechaReserva, horaInicio, horaFinal } = req.body;
+  // La reserva queda a nombre del usuario de la sesión (la ruta exige authenticateToken)
+  const idUsuario = req.user.id;
+  const { idInstalacion, fechaReserva, horaInicio, horaFinal } = req.body;
 
-  if (!idUsuario || !idInstalacion || !fechaReserva || !horaInicio || !horaFinal) {
+  if (!idInstalacion || !fechaReserva || !horaInicio || !horaFinal) {
     return res.status(400).json({ message: "Datos obligatorios incompletos" });
   }
 
   let connection;
   try {
     connection = await mysqlPool.getConnection();
-    const result = await insertReservation(connection, req.body);
+    const result = await insertReservation(connection, { ...req.body, idUsuario });
     if (result.conflict) {
       return res.status(409).json({ message: "La instalación ya está reservada en ese horario." });
     }
@@ -95,6 +98,7 @@ const createReservation = async (req, res) => {
  */
 const getUserReservations = async (req, res) => {
   const { userId } = req.params;
+  if (!canAccessUser(req, userId)) return denyAccess(res);
 
   const query = `
     SELECT r.*, i.NOMBRE_INSTALACION, e.DESCRIPCION

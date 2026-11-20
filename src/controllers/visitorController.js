@@ -1,6 +1,26 @@
 const { mysqlPool } = require('../config/db');
 const moment = require('moment-timezone');
 const { buildEncryptedQR, QR_TYPES } = require('../utils/qrCrypto');
+const { canAccessUser, denyAccess } = require('../utils/access');
+
+/**
+ * La visita debe ser del usuario de la sesión (o la gestiona un administrador). Responde 404/403
+ * y devuelve false si no; las rutas ya exigen sesión (visitorRoutes usa authenticateToken).
+ */
+const ensureVisitOwner = async (connection, req, res, isRecurrent, id) => {
+  const table = isRecurrent ? 'TBL_VISITANTES_RECURRENTES' : 'TBL_REGVISITAS';
+  const pk = isRecurrent ? 'ID_VISITANTES_RECURRENTES' : 'ID_VISITANTE';
+  const [rows] = await connection.query(`SELECT ID_USUARIO FROM ${table} WHERE ${pk} = ?`, [id]);
+  if (rows.length === 0) {
+    res.status(404).json({ message: 'Visita no encontrada.' });
+    return false;
+  }
+  if (!canAccessUser(req, rows[0].ID_USUARIO)) {
+    res.status(403).json({ message: 'Solo el residente que registró la visita puede modificarla.' });
+    return false;
+  }
+  return true;
+};
 
 // Cantidad de personas: respeta el valor enviado (incluido el cambio de acompañantes)
 const parsePersonas = (value, fallback) => {
@@ -102,7 +122,8 @@ const registerVisit = async (req, res) => {
 
   try {
     connection = await mysqlPool.getConnection();
-    const result = await createVisit(connection, req.body);
+    // El residente es el de la sesión, nunca el que diga el body: así nadie genera QR a nombre de otro
+    const result = await createVisit(connection, { ...req.body, usuarioId: req.user.id });
     if (!result) {
       return res.status(404).json({ error: "Datos del residente no encontrados" });
     }
@@ -148,6 +169,7 @@ const validateQR = async (req, res) => {
 
 const getVisitorHistory = async (req, res) => {
   const { usuarioId } = req.params;
+  if (!canAccessUser(req, usuarioId)) return denyAccess(res);
   const { search } = req.query; // New search parameter
   let connection;
 
@@ -233,7 +255,8 @@ const regenerateVisit = async (req, res) => {
 
   try {
     connection = await mysqlPool.getConnection();
-    
+    if (!(await ensureVisitOwner(connection, req, res, type === 'recurrent', id))) return;
+
     if (type === 'recurrent') {
       const [original] = await connection.query("SELECT * FROM TBL_VISITANTES_RECURRENTES WHERE ID_VISITANTES_RECURRENTES = ?", [id]);
       if (original.length === 0) return res.status(404).json({ message: "Visita no encontrada" });
@@ -336,7 +359,8 @@ const convertToRecurrent = async (req, res) => {
 
   try {
     connection = await mysqlPool.getConnection();
-    
+    if (!(await ensureVisitOwner(connection, req, res, false, id))) return;
+
     // Get original visit data
     const [original] = await connection.query("SELECT * FROM TBL_REGVISITAS WHERE ID_VISITANTE = ?", [id]);
     if (original.length === 0) return res.status(404).json({ message: "Visita original no encontrada" });
@@ -411,6 +435,7 @@ const deleteVisitor = async (req, res) => {
 
   try {
     connection = await mysqlPool.getConnection();
+    if (!(await ensureVisitOwner(connection, req, res, type === 'recurrent', id))) return;
     let query;
     if (type === 'recurrent') {
       query = "DELETE FROM TBL_VISITANTES_RECURRENTES WHERE ID_VISITANTES_RECURRENTES = ?";
@@ -483,6 +508,7 @@ const cancelVisit = async (req, res) => {
 
 const getRecurrentVisitSummary = async (req, res) => {
   const { usuarioId } = req.params;
+  if (!canAccessUser(req, usuarioId)) return denyAccess(res);
   let connection;
   try {
     connection = await mysqlPool.getConnection();
@@ -502,6 +528,7 @@ const getRecurrentVisitSummary = async (req, res) => {
 
 const getRecurrentVisitDetails = async (req, res) => {
   const { usuarioId } = req.params;
+  if (!canAccessUser(req, usuarioId)) return denyAccess(res);
   let connection;
   try {
     connection = await mysqlPool.getConnection();
@@ -532,6 +559,7 @@ const updateRecurrentVisitExpiry = async (req, res) => {
   let connection;
   try {
     connection = await mysqlPool.getConnection();
+    if (!(await ensureVisitOwner(connection, req, res, true, id))) return;
     await connection.query(
       "UPDATE TBL_VISITANTES_RECURRENTES SET FECHA_VENCIMIENTO = ? WHERE ID_VISITANTES_RECURRENTES = ?",
       [FECHA_VENCIMIENTO, id]

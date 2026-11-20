@@ -7,6 +7,7 @@
  *   - database/migrations/2026-11-07_auditoria.sql
  *   - database/migrations/2026-11-08_politicas.sql
  *   - database/migrations/2026-11-10_inteligencia_artificial.sql
+ *   - database/migrations/2026-11-19_sesion_unica.sql
  */
 const { mysqlPool } = require('./db');
 
@@ -19,6 +20,9 @@ const REQUIRED_COLUMNS = [
   ['TBL_REGVISITAS', 'MOTIVO_CANCELACION', "VARCHAR(255) NULL DEFAULT NULL COMMENT 'Motivo indicado por el residente'"],
   ['TBL_VISITANTES_RECURRENTES', 'FECHA_CANCELACION', "DATETIME NULL DEFAULT NULL COMMENT 'Fecha/hora (Honduras) en que el residente canceló la visita'"],
   ['TBL_VISITANTES_RECURRENTES', 'MOTIVO_CANCELACION', "VARCHAR(255) NULL DEFAULT NULL COMMENT 'Motivo indicado por el residente'"],
+  // Sesión única por usuario (solo hashes: ni el id de sesión ni el del dispositivo se guardan tal cual)
+  ['TBL_MS_USUARIO', 'SESION_ID', "CHAR(64) NULL DEFAULT NULL COMMENT 'SHA-256 del id de la única sesión abierta; NULL = sin sesión'"],
+  ['TBL_MS_USUARIO', 'DISPOSITIVO_ID', "CHAR(64) NULL DEFAULT NULL COMMENT 'HMAC del identificador aleatorio del dispositivo de confianza'"],
   ...AUDIT_TABLES.flatMap(t => [[t, 'ACCION', AUDIT_ACCION], [t, 'DETALLE', AUDIT_DETALLE]]),
 ];
 
