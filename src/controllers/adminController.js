@@ -4,6 +4,14 @@ const moment = require('moment-timezone');
 const catalogs = require('../utils/catalogs');
 const { ACCION, logUsuario, logPersona, logParametro } = require('../utils/audit');
 const { notifyAdminsNewReservation } = require('../utils/reservationNotify');
+const { forgetSession } = require('../utils/sessions');
+
+// Parámetros de la geocerca: solo el Super Administrador (igual que sus rutas propias en adminRoutes)
+const SUPER_ADMIN_PARAMS = ['GEOCERCA_ACTIVA', 'PRECISION_MAXIMA_GPS_METROS'];
+const touchesSuperAdminParam = (req, ...names) =>
+  Number(req.user?.role) !== 1 && names.some((n) => n && SUPER_ADMIN_PARAMS.includes(String(n).toUpperCase().trim()));
+const SUPER_ADMIN_PARAM_MESSAGE = 'Los parámetros de la geocerca solo los puede cambiar el Super Administrador.';
+const SUPER_ADMIN_ACCOUNT_MESSAGE = 'Solo el Super Administrador puede modificar o dar de baja su propia cuenta.';
 
 // Misma consulta que la "fotografía previa" de updateMaintenanceRecord (usuarios)
 const SNAPSHOT_USUARIO_SQL = `
@@ -1365,6 +1373,9 @@ const createMaintenanceRecord = async (req, res) => {
         if (!PARAMETRO || VALOR === undefined) {
           return res.status(400).json({ success: false, message: 'Nombre del parámetro y valor son obligatorios.' });
         }
+        if (touchesSuperAdminParam(req, PARAMETRO)) {
+          return res.status(403).json({ success: false, message: SUPER_ADMIN_PARAM_MESSAGE });
+        }
         await connection.query(`
           INSERT INTO TBL_MS_PARAMETROS (ID_USUARIO, PARAMETRO, VALOR, FECHA_CREACION)
           VALUES (?, ?, ?, NOW());
@@ -1414,6 +1425,7 @@ const updateMaintenanceRecord = async (req, res) => {
   }
 
   let connection;
+  let sesionPorOlvidar = null; // cuenta cuya sesión se cerró (se limpia la caché tras el commit)
 
   try {
     connection = await mysqlPool.getConnection();
@@ -1441,6 +1453,14 @@ const updateMaintenanceRecord = async (req, res) => {
         if (ID_ROL !== undefined && Number(ID_ROL) === 1) {
           await connection.rollback();
           return res.status(403).json({ success: false, message: 'El rol de Super Administrador solo puede ser asignado a nivel de base de datos.' });
+        }
+
+        // La cuenta del Super Administrador solo la modifica él mismo: antes un administrador podía
+        // cambiarle el correo y la contraseña y quedarse con ella
+        const [[objetivo]] = await connection.query('SELECT ID_ROL, EMAIL FROM TBL_MS_USUARIO WHERE ID_USUARIO = ? FOR UPDATE', [id]);
+        if (objetivo && Number(objetivo.ID_ROL) === 1 && Number(req.user?.role) !== 1) {
+          await connection.rollback();
+          return res.status(403).json({ success: false, message: SUPER_ADMIN_ACCOUNT_MESSAGE });
         }
 
         const nombreVal = NOMBRE_USUARIO !== undefined ? (NOMBRE_USUARIO ? String(NOMBRE_USUARIO).trim().toUpperCase() : null) : undefined;
@@ -1474,6 +1494,23 @@ const updateMaintenanceRecord = async (req, res) => {
             ${passwordQuery}
           WHERE ID_USUARIO = ?;
         `, params);
+
+        // Si cambia a un estado no activo, o cambian el rol, el correo o la contraseña, se cierra la
+        // sesión abierta de la cuenta (y se olvida su token push). Al reactivarla se reinician sus
+        // intentos fallidos: si no, un solo error la volvería a bloquear.
+        const valorDado = (v) => v !== undefined && v !== null && v !== '';
+        const cierraSesion =
+          (valorDado(ID_ESTADO_USUARIO) && Number(ID_ESTADO_USUARIO) !== 1)
+          || (valorDado(ID_ROL) && Number(ID_ROL) !== Number(objetivo?.ID_ROL))
+          || Boolean(passwordQuery)
+          || (Boolean(emailVal) && emailVal !== String(objetivo?.EMAIL || '').toLowerCase());
+        if (cierraSesion) {
+          await connection.query('UPDATE TBL_MS_USUARIO SET SESION_ID = NULL, FCM_TOKEN = NULL WHERE ID_USUARIO = ?', [id]);
+          sesionPorOlvidar = id;
+        }
+        if (valorDado(ID_ESTADO_USUARIO) && Number(ID_ESTADO_USUARIO) === 1) {
+          await connection.query('UPDATE TBL_MS_USUARIO SET INTENTOS_FALLIDOS = 0 WHERE ID_USUARIO = ?', [id]);
+        }
 
         // Obtener rol actual o actualizado
         let currentRol = ID_ROL !== undefined ? Number(ID_ROL) : null;
@@ -1704,6 +1741,11 @@ const updateMaintenanceRecord = async (req, res) => {
       case 'parametros': {
         const { PARAMETRO, VALOR } = updates;
         const [[antesParametro]] = await connection.query('SELECT * FROM TBL_MS_PARAMETROS WHERE ID_PARAMETRO = ?', [id]);
+        // Se revisa el nombre actual y el nuevo: un cambio de nombre también podría tocar la geocerca
+        if (touchesSuperAdminParam(req, antesParametro?.PARAMETRO, PARAMETRO)) {
+          await connection.rollback();
+          return res.status(403).json({ success: false, message: SUPER_ADMIN_PARAM_MESSAGE });
+        }
         await connection.query(`
           UPDATE TBL_MS_PARAMETROS SET
             PARAMETRO = COALESCE(?, PARAMETRO),
@@ -1728,6 +1770,8 @@ const updateMaintenanceRecord = async (req, res) => {
     }
 
     await connection.commit();
+    // Después de confirmar: la próxima petición de esa cuenta ya lee la sesión cerrada
+    if (sesionPorOlvidar) forgetSession(sesionPorOlvidar);
     res.status(200).json({ success: true, message: `Registro actualizado correctamente en ${table}.` });
 
   } catch (error) {
@@ -1762,8 +1806,14 @@ const deleteMaintenanceRecord = async (req, res) => {
 
     switch (table) {
       case 'usuarios': {
-        // En usuarios hacemos desactivación de estado para no romper integridad de bitácora
-        await connection.query('UPDATE TBL_MS_USUARIO SET ID_ESTADO_USUARIO = 2 WHERE ID_USUARIO = ?', [id]);
+        const [[objetivo]] = await connection.query('SELECT ID_ROL FROM TBL_MS_USUARIO WHERE ID_USUARIO = ?', [id]);
+        if (objetivo && Number(objetivo.ID_ROL) === 1 && Number(req.user?.role) !== 1) {
+          return res.status(403).json({ success: false, message: SUPER_ADMIN_ACCOUNT_MESSAGE });
+        }
+        // En usuarios hacemos desactivación de estado para no romper integridad de bitácora.
+        // Dar de baja cierra su sesión abierta y olvida su token push.
+        await connection.query('UPDATE TBL_MS_USUARIO SET ID_ESTADO_USUARIO = 2, SESION_ID = NULL, FCM_TOKEN = NULL WHERE ID_USUARIO = ?', [id]);
+        forgetSession(id);
         await connection.query('UPDATE TBL_PERSONAS SET ID_ESTADO_PERSONA = 2 WHERE ID_USUARIO = ?', [id]);
         await logUsuario(connection, req, { idUsuario: id, accion: ACCION.DESACTIVACION, detalle: 'Usuario dado de baja desde el panel (estado inactivo)' });
         await logPersona(connection, req, { idUsuario: id, accion: ACCION.DESACTIVACION, detalle: 'Residente dado de baja desde el panel' });
@@ -1788,6 +1838,9 @@ const deleteMaintenanceRecord = async (req, res) => {
 
       case 'parametros': {
         const [[antes]] = await connection.query('SELECT * FROM TBL_MS_PARAMETROS WHERE ID_PARAMETRO = ?', [id]);
+        if (touchesSuperAdminParam(req, antes?.PARAMETRO)) {
+          return res.status(403).json({ success: false, message: SUPER_ADMIN_PARAM_MESSAGE });
+        }
         await connection.query('DELETE FROM TBL_MS_PARAMETROS WHERE ID_PARAMETRO = ?', [id]);
         if (antes) {
           await logParametro(connection, req, {

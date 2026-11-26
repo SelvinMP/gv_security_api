@@ -37,9 +37,10 @@ router.get('/parentesco', authController.getRelationships);
 router.get('/nacionalidad', authController.getNationalities);
 router.get('/contacto', authController.getContactTypes);
 router.get('/personas', authController.getCondos);
-router.post('/save-fcm-token', authController.saveFCMToken);
-router.get('/push-status/:usuarioId', authController.getPushStatus);
-router.post('/set-push-status', authController.setPushStatus);
+// Notificaciones push: solo con sesión, y siempre sobre la cuenta de la sesión
+router.post('/save-fcm-token', authenticateToken, authController.saveFCMToken);
+router.get('/push-status/:usuarioId', authenticateToken, authController.getPushStatus);
+router.post('/set-push-status', authenticateToken, authController.setPushStatus);
 router.post('/push-test', authenticateToken, authController.sendTestPush);
 router.post('/change-password', authenticateToken, authController.changePassword);
 router.post('/forgot-password', authController.enviarCodigoRecuperacion);

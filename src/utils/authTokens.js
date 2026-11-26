@@ -5,11 +5,12 @@ require('dotenv').config();
 const SECRET_KEY = process.env.SECRET_KEY || 'your_secret_key';
 
 /**
- * Tokens de un solo propósito: el paso intermedio del 2FA ('pre2fa') y el restablecimiento
- * de contraseña ('pwdReset'). Se firman con una clave derivada distinta de la de sesión, así
- * que authenticateToken (y cualquier jwt.verify con SECRET_KEY) los rechaza: no sirven como sesión.
+ * Tokens de un solo propósito: el paso intermedio del 2FA ('pre2fa'), el restablecimiento de
+ * contraseña ('pwdReset') y el paso de datos personales del registro ('register'). Se firman con
+ * una clave derivada distinta de la de sesión, así que authenticateToken (y cualquier jwt.verify
+ * con SECRET_KEY) los rechaza: no sirven como sesión.
  */
-const PURPOSES = ['pre2fa', 'pwdReset'];
+const PURPOSES = ['pre2fa', 'pwdReset', 'register'];
 
 const keyFor = (purpose) => {
   if (!PURPOSES.includes(purpose)) throw new Error(`Propósito de token desconocido: ${purpose}`);

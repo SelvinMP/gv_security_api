@@ -11,22 +11,9 @@ const SECRET_KEY = process.env.SECRET_KEY || 'your_secret_key';
 // El inicio de sesión de guardias ahora es el mismo de la app (authController.login, ver guardiaRoutes):
 // el anterior no bloqueaba por intentos fallidos ni respetaba la sesión única.
 
-// Helper: Extraer ID del guardia desde el token JWT o los parámetros de la petición
-const getGuardiaIdFromReq = (req) => {
-  try {
-    const authHeader = req.headers['authorization'];
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.split(' ')[1];
-      const decoded = jwt.verify(token, SECRET_KEY);
-      if (decoded && decoded.id) return decoded.id;
-    }
-  } catch (e) {
-    // Si no es token válido, continuar con query / body
-  }
-
-  return req.body?.guardiaId || req.body?.idGuardia || req.body?.id_usuario ||
-         req.query?.guardiaId || req.query?.idGuardia || req.query?.id_usuario || null;
-};
+// Helper: ID del guardia = el de la sesión. Todas las rutas que lo usan exigen sesión de caseta
+// (guardOnly en guardiaRoutes); antes se aceptaba el guardiaId que mandara el cliente.
+const getGuardiaIdFromReq = (req) => req.user?.id ?? null;
 
 // Helper: Registrar intento fallido de escaneo en TBL_LOG_ESCANEO_FALLIDO
 const registrarLogFallido = async (connection, {

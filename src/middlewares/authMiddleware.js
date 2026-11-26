@@ -11,10 +11,9 @@ const SECRET_KEY = process.env.SECRET_KEY || 'your_secret_key';
  * si se inició sesión en otro dispositivo o se cerró, responde 401 con un `code` que la app reconoce.
  */
 const authenticateToken = async (req, res, next) => {
+  // Solo en el encabezado: un token en la URL (?token=) queda escrito en los registros del servidor
   const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.startsWith('Bearer ')
-    ? authHeader.split(' ')[1]
-    : (req.query.token || null);
+  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
 
   if (!token) {
     return res.status(401).json({ success: false, message: 'Acceso no autorizado. Token no proporcionado.' });
@@ -24,6 +23,10 @@ const authenticateToken = async (req, res, next) => {
   try {
     decoded = jwt.verify(token, SECRET_KEY);
   } catch (err) {
+    // Vencido: 401 con código, para que la app cierre la sesión y lleve al login con el aviso
+    if (err.name === 'TokenExpiredError') {
+      return res.status(401).json({ success: false, code: 'SESSION_EXPIRED', message: SESSION_ERRORS.SESSION_EXPIRED });
+    }
     return res.status(403).json({ success: false, message: 'Token inválido o expirado.' });
   }
 
