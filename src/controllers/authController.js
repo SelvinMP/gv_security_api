@@ -1080,7 +1080,8 @@ const getUserProfile = async (req, res) => {
           c.DESCRIPCION AS CONTACTO,
           p.ID_PERSONA,
           p.ID_PADRE,
-          r.ROL AS ROL
+          r.ROL AS ROL,
+          (u.FOTO_PERFIL IS NOT NULL) AS TIENE_FOTO
       FROM TBL_MS_USUARIO u
       LEFT JOIN TBL_PERSONAS p 
           ON u.ID_USUARIO = p.ID_USUARIO

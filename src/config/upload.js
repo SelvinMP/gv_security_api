@@ -62,4 +62,22 @@ const uploadPolitica = multer({
   limits: { fileSize: 10 * 1024 * 1024 } // 10 MB
 });
 
-module.exports = { uploadAnuncio, uploadDir, uploadPolitica, policyDir };
+// ─── Fotos de perfil ───
+// Privadas: fuera de /uploads (público). Se sirven por /api/auth/profile-photo/:id con sesión, solo
+// al dueño y a la administración. En la base solo se guarda la ruta relativa (avatars/<archivo>).
+// STORAGE_ROOT permite apuntar a un disco persistente (en Render, el disco normal se borra en cada
+// despliegue o reinicio).
+const storageRoot = process.env.STORAGE_ROOT || path.join(__dirname, '../../storage');
+const avatarDir = path.join(storageRoot, 'avatars');
+if (!fs.existsSync(avatarDir)) {
+  fs.mkdirSync(avatarDir, { recursive: true });
+}
+
+// En memoria: el controlador revisa el contenido real (no el nombre ni el tipo que dice el
+// navegador) antes de escribir el archivo
+const uploadAvatar = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024, files: 1 }, // 2 MB (la app ya la reduce a 512 px)
+});
+
+module.exports = { uploadAnuncio, uploadDir, uploadPolitica, policyDir, uploadAvatar, avatarDir, storageRoot };

@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
+const profilePhoto = require('../controllers/profilePhotoController');
 const { authenticateToken } = require('../middlewares/authMiddleware');
 
 router.post('/register', authController.register);
@@ -20,6 +21,10 @@ router.get('/2fa-status', authenticateToken, authController.get2FAStatus);
 router.get('/2fa-status/:usuarioId', authenticateToken, authController.get2FAStatus);
 router.post('/set2FAStatus', authenticateToken, authController.set2FAStatus);
 router.get('/profile/:usuarioId', authenticateToken, authController.getUserProfile);
+// Foto de perfil: archivo en el servidor (carpeta privada), en la base solo su ruta
+router.post('/profile-photo', authenticateToken, profilePhoto.receivePhoto, profilePhoto.uploadProfilePhoto);
+router.get('/profile-photo/:usuarioId', authenticateToken, profilePhoto.getProfilePhoto);
+router.delete('/profile-photo', authenticateToken, profilePhoto.deleteProfilePhoto);
 router.get('/family/:usuarioId', authenticateToken, authController.getFamilyMembers);
 router.get('/condo-details/:usuarioId', authenticateToken, authController.getCondominiumDetails);
 router.get('/pending-users/:usuarioId', authenticateToken, authController.getPendingUsers);

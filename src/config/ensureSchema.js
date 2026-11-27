@@ -8,6 +8,7 @@
  *   - database/migrations/2026-11-08_politicas.sql
  *   - database/migrations/2026-11-10_inteligencia_artificial.sql
  *   - database/migrations/2026-11-19_sesion_unica.sql
+ *   - database/migrations/2026-11-26_foto_perfil.sql
  */
 const { mysqlPool } = require('./db');
 
@@ -23,6 +24,8 @@ const REQUIRED_COLUMNS = [
   // Sesión única por usuario (solo hashes: ni el id de sesión ni el del dispositivo se guardan tal cual)
   ['TBL_MS_USUARIO', 'SESION_ID', "CHAR(64) NULL DEFAULT NULL COMMENT 'SHA-256 del id de la única sesión abierta; NULL = sin sesión'"],
   ['TBL_MS_USUARIO', 'DISPOSITIVO_ID', "CHAR(64) NULL DEFAULT NULL COMMENT 'HMAC del identificador aleatorio del dispositivo de confianza'"],
+  // Foto de perfil: solo la ruta relativa del archivo (storage/avatars), nunca la imagen
+  ['TBL_MS_USUARIO', 'FOTO_PERFIL', "VARCHAR(255) NULL DEFAULT NULL COMMENT 'Ruta relativa de la foto de perfil (avatars/<archivo>); la imagen vive en el servidor'"],
   ...AUDIT_TABLES.flatMap(t => [[t, 'ACCION', AUDIT_ACCION], [t, 'DETALLE', AUDIT_DETALLE]]),
 ];
 
